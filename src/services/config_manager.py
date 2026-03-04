@@ -16,16 +16,18 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from threading import Lock
+from typing import final
 
-from src.utils.models import AppConfig
+from utils.models import AppConfig
 from utils.file_utils import get_config_path
 
 
+@final # Makes sure that this class cannot be used as subclass, makes my analyzer not complain
 class ConfigManager:
     """Thread-safe, lazy-loading singleton that exposes an ``AppConfig``."""
 
     _instance: ConfigManager | None = None
-    _lock: Lock = Lock()
+    _lock = Lock()
     _path: Path | None = None
     _config: AppConfig | None = None
 
@@ -62,7 +64,7 @@ class ConfigManager:
 
 
     @classmethod
-    def _reset(cls) -> None:
+    def _reset(cls) -> None:  # pyright: ignore[reportUnusedFunction]
         """Destroy the singleton (for testing only)."""
         with cls._lock:
             cls._instance = None
