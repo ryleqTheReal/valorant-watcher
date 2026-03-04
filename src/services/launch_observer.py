@@ -106,10 +106,10 @@ class ProcessWatcher:
 
     State machine:
         NOT_RUNNING --(process found)--> RUNNING
-                     emit(LOCKFILE_APPEARED)
+                     emit(VALORANT_OPENED)
 
         RUNNING --(process gone)--> NOT_RUNNING
-                 emit(LOCKFILE_DISAPPEARED)
+                 emit(VALORANT_CLOSED)
     """
 
     def __init__(
@@ -163,14 +163,14 @@ class ProcessWatcher:
 
                     if lockfile_data:
                         # again using _ to avoid analyzer complaining
-                        _ = await self.bus.emit(Event.LOCKFILE_APPEARED, lockfile_data)
+                        _ = await self.bus.emit(Event.VALORANT_OPENED, lockfile_data)
                     else:
                         logger.warning("VALORANT is running but lockfile is unreadable. Skipping auth.")
 
                 # transition: running -> not running
                 elif not valorant_running and self._valorant_was_running:
                     logger.info("VALORANT process terminated")
-                    _ = await self.bus.emit(Event.LOCKFILE_DISAPPEARED)
+                    _ = await self.bus.emit(Event.VALORANT_CLOSED)
 
                 self._valorant_was_running = valorant_running
                 await asyncio.sleep(self.poll_interval)

@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 class Event(Enum):
     """All events that can occur in the system."""
 
-    LOCKFILE_APPEARED = "LOCKFILE_APPEARED"     # Valorant process detected, lockfile read
-    LOCKFILE_DISAPPEARED = "LOCKFILE_DISAPPEARED"   # Valorant process terminated
+    VALORANT_OPENED = "VALORANT_OPENED"         # Valorant process detected, lockfile read
+    VALORANT_CLOSED = "VALORANT_CLOSED"         # Valorant process terminated
     AUTH_SUCCESS = "AUTH_SUCCESS"               # Riot auth succeeded
     AUTH_FAILED = "AUTH_FAILED"                 # Riot auth failed
     MATCH_STARTED = "MATCH_STARTED"             # New match detected
@@ -46,8 +46,8 @@ class EventBus:
 
     Usage:
         bus = EventBus()
-        bus.on(Event.LOCKFILE_APPEARED, my_handler)
-        await bus.emit(Event.LOCKFILE_APPEARED, lockfile_data)
+        bus.on(Event.VALORANT_CLOSED, my_handler)
+        await bus.emit(Event.VALORANT_CLOSED, lockfile_data)
     """
 
     def __init__(self) -> None:
@@ -93,7 +93,7 @@ class EventBus:
         """
         Decorator for registering listeners:
 
-            @bus.listen(Event.LOCKFILE_APPEARED)
+            @bus.listen(Event.VALORANT_CLOSED)
             async def handle_lockfile(data):
                 ...
         """
