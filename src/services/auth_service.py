@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 
@@ -60,13 +61,14 @@ class AuthHandler:
 
     def _register(self) -> None:
         """Subscribe to relevant events."""
-        _ = self.bus.on(Event.VALORANT_OPENED, self._on_lockfile_appeared, priority=10)
-        _ = self.bus.on(Event.VALORANT_CLOSED, self._on_lockfile_disappeared, priority=10)
+        _ = self.bus.on(Event.VALORANT_OPENED, self._op_valorant_open, priority=10)
+        _ = self.bus.on(Event.VALORANT_CLOSED, self._op_valorant_close, priority=10)
         _ = self.bus.on(Event.SHUTDOWN, self._on_shutdown, priority=0)
 
     # ------------------- Event Handlers: ------------------- 
+    # IMPORTANT: Make sure that each handdler funtion allows for a data parameter even if it's not used IMPORTANT
 
-    async def _on_lockfile_appeared(self, data: LockfileData) -> None:
+    async def _op_valorant_open(self, data: LockfileData) -> None:
         """Valorant started -> authenticate"""
         
         logger.info(f"Authenticating against {data.base_url} ...")
@@ -83,16 +85,16 @@ class AuthHandler:
             await self._cleanup_session()
             _ = await self.bus.emit(Event.AUTH_FAILED, {"error": str(e)})
 
-    async def _on_lockfile_disappeared(self) -> None:
+    async def _op_valorant_close(self, data: Any = None) -> None:  # pyright: ignore[reportAny, reportUnusedParameter, reportExplicitAny]
         """Valorant closed -> tear down session"""
         logger.info("Valorant closed - cleaning up session")
         await self._cleanup_session()
 
-    async def _on_shutdown(self) -> None:
+    async def _on_shutdown(self, data: Any = None) -> None: # pyright: ignore[reportAny, reportUnusedParameter, reportExplicitAny]
         """App is shutting down """
         await self._cleanup_session()
 
-    async def _cleanup_session(self) -> None:
+    async def _cleanup_session(self, data: Any = None) -> None: # pyright: ignore[reportAny, reportUnusedParameter, reportExplicitAny]
         """Cleans up the session"""
         if self.session:
             await self.session.close()
