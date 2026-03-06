@@ -3,6 +3,8 @@ from pathlib import Path
 import platform
 import logging
 
+from utils.exceptions import UnknownPlatformError
+
 logger: logging.Logger = logging.getLogger(__name__)
 
 """Here we dump all low-level path resolution functinons and anything regarding paths"""
@@ -33,14 +35,26 @@ def get_default_lockfile_path() -> Path:
             / "Library" / "Application Support"
             / "Riot Games" / "Riot Client" / "Config" / "lockfile"
         )
-    else:
-        # UNTESTED!
+    raise UnknownPlatformError(f"Unknown platform: '{system}'. This is unfixable.")
+        
+@cache
+def get_recent_log_path() -> Path:
+    system = platform.system()
+    # os.path.join(os.getenv('LOCALAPPDATA'), R'VALORANT\Saved\Logs\ShooterGame.log')
+    if system == "Windows":
         return (
             Path.home()
-            / ".local" / "share"
-            / "riot-games" / "lockfile"
+            / "AppData" / "Local"
+            / "VALORANT" / "Saved" / "Logs" / "ShooterGame.log"
         )
-      
+    elif system == "Darwin":
+        return (
+            Path.home()
+            / "Library" / "Application Support"
+            / "VALORANT" / "Saved" / "Logs" / "ShooterGame.log"
+        )
+    raise UnknownPlatformError(f"Unknown platform: '{system}'. This is unfixable.")
+    
 @cache  
 def get_config_path() -> Path:
     """Returns a Path object to the app config json

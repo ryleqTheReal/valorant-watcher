@@ -94,7 +94,6 @@ async def read_lockfile_with_retry(
     return None
 
 class ProcessWatcher:
-    # Thanks for the explanation claude :) vvvvvvvvvvvv
     """
     Polls periodically to check if the VALORANT process is running.
 

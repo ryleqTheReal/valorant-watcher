@@ -8,6 +8,7 @@ UNKNOWN_OS_ERROR = "UNKNOWN_OS_ERROR"
 RIOT_AUTHENTICATION_ERROR = "RIOT_AUTHENTICATION_ERROR"
 REGION_NOT_FOUND_ERROR = "REGION_NOT_FOUND_ERROR"
 VERSION_NOT_FOUND_ERROR = "VERSION_NOT_FOUND_ERROR"
+FALLBACK_API_ERROR = "FALLBACK_API_ERROR"
 
 class AppError(Exception):
     """Highest exception in hierarchy from which all other exceptions stem     
@@ -60,7 +61,7 @@ class UnknownPlatformError(AppError):
         
 # ------------ Riot Auth Errors ------------
 
-class AuthenticationError(BaseException):
+class AuthenticationError(AppError):
     """Generic error wrapper for anything related to riot authentication"""
     def __init__(self, *args: object, message: str = "Something went wrong when trying to create authenticated riot session") -> None:
         super().__init__(*args)
@@ -83,3 +84,11 @@ class VersionNotFoundError(AuthenticationError):
         self.is_critical: bool = True
         self.message: str = message
         self.internal_status: str = VERSION_NOT_FOUND_ERROR
+
+class FallbackApiError(AuthenticationError):
+    """The fallback API request to valorant-api.com failed"""
+    def __init__(self, *args: object, message: str = "Fallback API request failed") -> None:
+        super().__init__(*args)
+        self.is_critical: bool = True
+        self.message: str = message
+        self.internal_status: str = FALLBACK_API_ERROR
