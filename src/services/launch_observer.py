@@ -66,7 +66,7 @@ async def read_lockfile_with_retry(
     max_retries: int = 10,
     delay: float = 1.0,
 ) -> LockfileData | None:
-    """    Attempt to read the lockfile.
+    """Attempt to read the lockfile.
     Retries with a delay because the file may still be empty
     or locked shortly after the process starts.
 

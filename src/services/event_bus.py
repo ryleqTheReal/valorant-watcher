@@ -28,7 +28,10 @@ class Event(Enum):
     DATA_COLLECTED = "DATA_COLLECTED"           # New stats data collected
     DATA_SENT = "DATA_SENT"                     # Data sent to remote server
     DATA_QUEUED = "DATA_QUEUED"                 # Data queued locally (offline)
+    WEBSOCKET_EVENT = "WEBSOCKET_EVENT"         # Raw event from Riot Client WebSocket
     SHUTDOWN = "SHUTDOWN"                       # App is shutting down
+
+IGNORE_EVENTS = ["AUTH_SUCCESS", "WEBSOCKET_EVENT"]
 
 @dataclass
 class Listener:
@@ -108,7 +111,8 @@ class EventBus:
         Returns a list of return values from each listener.
         """
         
-        logger.info(f"Event: {event.name}" + (f" | data={data}" if data else ""))
+        if event.name not in IGNORE_EVENTS:
+            logger.info(f"Event: {event.name}" + (f" | data={data}" if data else "")) 
         self._history.append((event, data))
 
         results: list[object] = []

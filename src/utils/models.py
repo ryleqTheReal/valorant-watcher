@@ -60,6 +60,10 @@ class LockfileData:
         return f"{self.protocol}://127.0.0.1:{self.port}"
 
     @property
+    def wss_url(self) -> str:
+        return f"wss://127.0.0.1:{self.port}"
+    
+    @property
     def auth_header(self) -> str:
         """Basic auth header for the local Riot API."""
         token = base64.b64encode(f"riot:{self.password}".encode()).decode()
