@@ -265,75 +265,75 @@ class WebsocketEventWrapper[T]:
 
 @dataclass
 class _PremierPresenceData:
-    rosterId: str = ""
-    rosterName: str = ""
-    rosterTag: str = ""
-    rosterType: str = ""
-    division: int = 0
-    score: int = 0
-    plating: int = 0
-    showAura: bool = False
-    showTag: bool = False
-    showPlating: bool = False
+    rosterId: str | None = None
+    rosterName: str | None = None
+    rosterTag: str | None = None
+    rosterType: str | None = None
+    division: int | None = None
+    score: int | None = None
+    plating: int | None = None
+    showAura: bool | None = None
+    showTag: bool | None = None
+    showPlating: bool | None = None
 
 
 @dataclass
 class _MatchPresenceData:
-    sessionLoopState: str = ""
-    provisioningFlow: str = ""
-    matchMap: str = ""
-    queueId: str = ""
+    sessionLoopState: str | None = None
+    provisioningFlow: str | None = None
+    matchMap: str | None = None
+    queueId: str | None = None
 
 
 @dataclass
 class _PartyPresenceData:
-    partyId: str = ""
-    isPartyOwner: bool = False
-    partyState: str = ""
-    partyAccessibility: str = ""
-    partyLFM: bool = False
-    partyClientVersion: str = ""
-    partyVersion: int = 0
-    partySize: int = 0
-    queueEntryTime: str = ""
-    isPartyCrossPlayEnabled: bool = False
-    isPlayerCrossPlayEnabled: bool = False
-    partyPrecisePlatformTypes: int = 0
-    customGameName: str = ""
-    customGameTeam: str = ""
-    maxPartySize: int = 5
-    tournamentId: str = ""
-    rosterId: str = ""
-    partyOwnerSessionLoopState: str = ""
-    partyOwnerMatchMap: str = ""
-    partyOwnerProvisioningFlow: str = ""
-    partyOwnerMatchScoreAllyTeam: int = 0
-    partyOwnerMatchScoreEnemyTeam: int = 0
-    activityId: str = ""
+    partyId: str | None = None
+    isPartyOwner: bool | None = None
+    partyState: str | None = None
+    partyAccessibility: str | None = None
+    partyLFM: bool | None = None
+    partyClientVersion: str | None = None
+    partyVersion: int | None = None
+    partySize: int | None = None
+    queueEntryTime: str | None = None
+    isPartyCrossPlayEnabled: bool | None = None
+    isPlayerCrossPlayEnabled: bool | None = None
+    partyPrecisePlatformTypes: int | None = None
+    customGameName: str | None = None
+    customGameTeam: str | None = None
+    maxPartySize: int | None = None
+    tournamentId: str | None = None
+    rosterId: str | None = None
+    partyOwnerSessionLoopState: str | None = None
+    partyOwnerMatchMap: str | None = None
+    partyOwnerProvisioningFlow: str | None = None
+    partyOwnerMatchScoreAllyTeam: int | None = None
+    partyOwnerMatchScoreEnemyTeam: int | None = None
+    activityId: str | None = None
 
 
 @dataclass
 class _PlayerPresenceData:
-    playerCardId: str = ""
-    playerTitleId: str = ""
-    accountLevel: int = 0
-    competitiveTier: int = 0
-    leaderboardPosition: int = 0
+    playerCardId: str | None = None
+    playerTitleId: str | None = None
+    accountLevel: int | None = None
+    competitiveTier: int | None = None
+    leaderboardPosition: int | None = None
 
 
 @dataclass
 class PresencePrivate:
     """Decoded base64 JSON from the 'private' field of a presence object."""
 
-    isValid: bool = False
-    isIdle: bool = False
-    queueId: str = ""
-    provisioningFlow: str = ""
-    partyId: str = ""
-    partySize: int = 0
-    maxPartySize: int = 5
-    partyOwnerMatchScoreAllyTeam: int = 0
-    partyOwnerMatchScoreEnemyTeam: int = 0
+    isValid: bool | None = None
+    isIdle: bool | None = None
+    queueId: str | None = None
+    provisioningFlow: str | None = None
+    partyId: str | None = None
+    partySize: int | None = None
+    maxPartySize: int | None = None
+    partyOwnerMatchScoreAllyTeam: int | None = None
+    partyOwnerMatchScoreEnemyTeam: int | None = None
     premierPresenceData: _PremierPresenceData | dict[str, object] | None = None
     matchPresenceData: _MatchPresenceData | dict[str, object] | None = None
     partyPresenceData: _PartyPresenceData | dict[str, object] | None = None
@@ -362,27 +362,27 @@ class Presence:
 
     activePlatform: str | None = None
     actor: str | None = None
-    basic: str = ""
+    basic: str | None = None
     details: str | None = None
-    game_name: str = ""
-    game_tag: str = ""
+    game_name: str | None = None
+    game_tag: str | None = None
     location: str | None = None
     msg: str | None = None
-    name: str = ""
+    name: str | None = None
     packedData: object | None = None
     parties: list[object] | None = None
     patchline: str | None = None
-    pid: str = ""
+    pid: str | None = None
     platform: str | None = None
     private: PresencePrivate | str | None = None
     privateJwt: str | None = None
-    product: str = ""
-    puuid: str = ""
-    region: str = ""
-    resource: str = ""
-    state: str = ""
-    summary: str = ""
-    time: int = 0
+    product: str | None = None
+    puuid: str | None = None
+    region: str | None = None
+    resource: str | None = None
+    state: str | None = None
+    summary: str | None = None
+    time: int | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.private, str) and self.private:
@@ -440,7 +440,48 @@ class PresenceWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[Presen
         )
         return cls(opcode=wrapper.opcode, topic=wrapper.topic, data=envelope)
 
+@dataclass
+class _GunLoadoutData:
+    ID: str | None = None          # Weapon UUID
+    SkinID: str | None = None
+    SkinLevelID: str | None = None
+    ChromaID: str | None = None
+    CharmInstanceID: str | None = None
+    CharmID: str | None = None
+    CharmLevelID: str | None = None
+    Attachments: list[Any] | None = None  # pyright: ignore[reportExplicitAny]
 
+@dataclass
+class _SprayLoadoutData:
+    EquipSlotID: str | None = None
+    SprayID: str | None = None
+    SprayLevelID: str | None = None
+    
+@dataclass
+class _IdentityLoadoutData:
+    PlayerCardID: str | None = None
+    PlayerTitleID: str | None = None
+    AccountLevel: int | None = None
+    PreferredLevelBorderID: str | None = None
+    HideAccountLevel: bool | None = None
+    
+@dataclass
+class PlayerLoadoutResponse:
+    Subject: str          # PUUID — structurally required
+    Version: int | None = None
+    Guns: list[_GunLoadoutData] | list[dict[str, object]] | None = None
+    Sprays: list[_SprayLoadoutData] | list[dict[str, object]] | None = None
+    Identity: _IdentityLoadoutData | dict[str, object] | None = None
+    Incognito: bool | None = None
+    
+    def __post_init__(self) -> None:
+        if self.Guns and isinstance(self.Guns[0], dict):
+            self.Guns = [_GunLoadoutData(**g) for g in self.Guns]  # pyright: ignore[reportCallIssue]
+        if self.Sprays and isinstance(self.Sprays[0], dict):
+            self.Sprays = [_SprayLoadoutData(**s) for s in self.Sprays]  # pyright: ignore[reportCallIssue]
+        if isinstance(self.Identity, dict):
+            self.Identity = _IdentityLoadoutData(**self.Identity)  # pyright: ignore[reportArgumentType]
+    
 # ------------ Game State Models ------------
 
 
