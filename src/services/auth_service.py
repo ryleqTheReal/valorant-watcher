@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from multiprocessing import AuthenticationError
 import time
 from http import HTTPStatus
 import re
@@ -469,7 +470,7 @@ class AuthHandler:
         except Exception as e:
             logger.error(f"Auth failed: {e}")
             await self._cleanup_session()
-            _ = await self.bus.emit(Event.AUTH_FAILED, {"error": str(e)})
+            _ = await self.bus.emit(Event.AUTH_FAILED, AuthenticationError(str(e)))
 
     async def _on_valorant_close(self, data: Any = None) -> None:  # pyright: ignore[reportAny, reportUnusedParameter, reportExplicitAny]
         """Valorant closed -> tear down session"""

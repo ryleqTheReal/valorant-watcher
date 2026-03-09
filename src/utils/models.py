@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar
 
 from urllib.parse import urlparse, ParseResult
-from utils.exceptions import EndpointValidationError
+from utils.exceptions import EndpointValidationError, StructureValidationError
 
 T = TypeVar("T")
 
@@ -44,7 +44,7 @@ class LockfileData:
         parts = content.split(":")
 
         if len(parts) != 5:
-            raise ValueError(
+            raise StructureValidationError(
                 f"Unexpected lockfile format (expected 5 parts, received {len(parts)}): {content}"
             )
 

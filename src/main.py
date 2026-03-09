@@ -66,8 +66,15 @@ class ValorantStatsApp:
 
 
 def main() -> None:
-    app = ValorantStatsApp()
-    asyncio.run(app.run())
+    while True:
+        try:
+            app = ValorantStatsApp()
+            asyncio.run(app.run())
+            break
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            logger.exception("Crashed unexpectedly, restarting...")
 
 
 if __name__ == "__main__":

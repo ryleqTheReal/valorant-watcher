@@ -3,7 +3,7 @@ from pathlib import Path
 import platform
 import logging
 
-from utils.exceptions import UnknownPlatformError
+from utils.exceptions import PathResolutionError, UnknownPlatformError
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -68,5 +68,5 @@ def get_config_path() -> Path:
     config_path: Path = Path(__file__).resolve().parents[2] / "config.json"
     if not config_path.exists():
         logger.error("The config file does not exist, cannot launch properly.")
-        raise FileNotFoundError("The config file does not exist, cannot launch properly.")
+        raise PathResolutionError("The config file does not exist, cannot launch properly.")
     return config_path

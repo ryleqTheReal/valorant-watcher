@@ -92,3 +92,4 @@ class FallbackApiError(AuthenticationError):
         self.is_critical: bool = True
         self.message: str = message
         self.internal_status: str = FALLBACK_API_ERROR
+        

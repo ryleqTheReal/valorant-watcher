@@ -17,6 +17,7 @@ import logging
 from typing import Any
 
 from services.event_bus import Event, EventBus
+
 from utils.models import LockfileData, PresenceWebsocketEvent
 
 logger: logging.Logger = logging.getLogger(__name__)
