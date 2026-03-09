@@ -376,7 +376,7 @@ class Presence:
     platform: str | None = None
     private: PresencePrivate | str | None = None
     privateJwt: str | None = None
-    product: str | None = None
+    product: Literal["valorant", "league_of_legends"] | str | None = None
     puuid: str | None = None
     region: str | None = None
     resource: str | None = None
@@ -386,8 +386,12 @@ class Presence:
 
     def __post_init__(self) -> None:
         if isinstance(self.private, str) and self.private:
-            decoded = json.loads(base64.b64decode(self.private).decode())  # pyright: ignore[reportAny]
-            self.private = PresencePrivate(**decoded)  # pyright: ignore[reportAny]
+            if self.product != "valorant":
+                self.private = None
+                return
+            padded = self.private + "=" * (-len(self.private) % 4)
+            decoded: dict[str, object] = json.loads(base64.b64decode(padded).decode())  # pyright: ignore[reportAny]
+            self.private = PresencePrivate(**decoded)  # pyright: ignore[reportArgumentType]
 
 
 @dataclass
@@ -487,6 +491,7 @@ class _EntitlementItem:
     """A single owned item entry."""
     TypeID: str | None = None
     ItemID: str | None = None
+    InstanceID: str | None = None
     Tiers: object | None = None
 
 @dataclass
@@ -507,6 +512,17 @@ class OwnedItemsResponse:
     def __post_init__(self) -> None:
         if self.EntitlementsByTypes and isinstance(self.EntitlementsByTypes[0], dict):
             self.EntitlementsByTypes = [_EntitlementsByType(**e) for e in self.EntitlementsByTypes]  # pyright: ignore[reportCallIssue]
+
+    @property
+    def item_count(self) -> int:
+        """Total number of owned items across all item types."""
+        if not self.EntitlementsByTypes:
+            return 0
+        return sum(
+            len(group.Entitlements) if group.Entitlements else 0
+            for group in self.EntitlementsByTypes
+            if isinstance(group, _EntitlementsByType)
+        )
 
 
 class ItemTypes(Enum):
@@ -552,36 +568,24 @@ class GameStateTransition:
 # if __name__ == "__main__":
 #     from dataclasses import asdict
 
-#     with open(r"C:\Users\legit\Desktop\valorant-watcher\example_event.json", "r") as f:
-#         raw = json.loads(f.read())
-
 #     pp = lambda label, obj: print(f"\n{'=' * 40}\n{label}\n{'=' * 40}\n{json.dumps(asdict(obj), indent=2)}")
 
-#     # 1. Full event
-#     full_event = PresenceWebsocketEvent.from_raw_string(json.dumps(raw))
-#     pp("PresenceWebsocketEvent", full_event)
+#     # --- Owned Items ---
+#     with open(r"C:\Users\legit\Desktop\valorant-watcher\menus_get_owned.json", "r") as f:
+#         owned_raw = json.loads(f.read())
 
-#     # 2. WebsocketEventWrapper (raw WAMP message)
-#     wrapper = WebsocketEventWrapper.from_raw(raw)
-#     pp("WebsocketEventWrapper", wrapper)
+#     owned = OwnedItemsResponse(**owned_raw)
+#     print(f"Total owned items: {owned.item_count}")
+#     print(f"Item type groups: {len(owned.EntitlementsByTypes) if owned.EntitlementsByTypes else 0}")
 
-#     # 3. WebsocketEventEnvelope
-#     envelope_data: dict[str, object] = wrapper.data  
-#     envelope = WebsocketEventEnvelope(
-#         data=envelope_data.get("data", {}),
-#         eventType=str(envelope_data.get("eventType", "")),
-#         uri=str(envelope_data.get("uri", "")),
-#     )
-#     pp("WebsocketEventEnvelope", envelope)
+#     for group in (owned.EntitlementsByTypes or []):
+#         if isinstance(group, _EntitlementsByType):
+#             count = len(group.Entitlements) if group.Entitlements else 0
+#             print(f"  {group.ItemTypeID}: {count} items")
 
-#     # 4. PresenceResponse
-#     presence_response = PresenceResponse(**envelope.data)
-#     pp("PresenceResponse", presence_response)
-
-#     # 5. Single Presence
-#     presence = presence_response.presences[0]  
-#     pp("Presence", presence)
-
-#     # 6. PresencePrivate
-#     pp("PresencePrivate", presence.private) 
+#     # First item of first group
+#     if owned.EntitlementsByTypes and isinstance(owned.EntitlementsByTypes[0], _EntitlementsByType):
+#         first_group = owned.EntitlementsByTypes[0]
+#         if first_group.Entitlements and isinstance(first_group.Entitlements[0], _EntitlementItem):
+#             pp("First EntitlementItem", first_group.Entitlements[0])
 
