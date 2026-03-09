@@ -467,8 +467,8 @@ class _IdentityLoadoutData:
     
 @dataclass
 class PlayerLoadoutResponse:
-    Subject: str          # PUUID — structurally required
-    Version: int | None = None
+    Subject: str                    # PUUID structurally required
+    Version: int | None = None      # Increments with every new change
     Guns: list[_GunLoadoutData] | list[dict[str, object]] | None = None
     Sprays: list[_SprayLoadoutData] | list[dict[str, object]] | None = None
     Identity: _IdentityLoadoutData | dict[str, object] | None = None
@@ -482,6 +482,45 @@ class PlayerLoadoutResponse:
         if isinstance(self.Identity, dict):
             self.Identity = _IdentityLoadoutData(**self.Identity)  # pyright: ignore[reportArgumentType]
     
+@dataclass
+class _EntitlementItem:
+    """A single owned item entry."""
+    TypeID: str | None = None
+    ItemID: str | None = None
+    Tiers: object | None = None
+
+@dataclass
+class _EntitlementsByType:
+    """A group of owned items sharing the same ItemTypeID."""
+    ItemTypeID: str | None = None
+    Entitlements: list[_EntitlementItem] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.Entitlements and isinstance(self.Entitlements[0], dict):
+            self.Entitlements = [_EntitlementItem(**e) for e in self.Entitlements]  # pyright: ignore[reportCallIssue]
+
+@dataclass
+class OwnedItemsResponse:
+    """Response from GET /store/v1/entitlements/{puuid}/{ItemTypeID?}"""
+    EntitlementsByTypes: list[_EntitlementsByType] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.EntitlementsByTypes and isinstance(self.EntitlementsByTypes[0], dict):
+            self.EntitlementsByTypes = [_EntitlementsByType(**e) for e in self.EntitlementsByTypes]  # pyright: ignore[reportCallIssue]
+
+
+class ItemTypes(Enum):
+    """Collection of the item types mapped to their ItemTypeID
+       This is especially useful for GET PD /store/v1/entitlements/{puuid}/{ItemTypeID}"""
+    
+    AGENTS = "01bb38e1-da47-4e6a-9b3d-945fe4655707"
+    SPRAYS = "d5f120f8-ff8c-4aac-92ea-f2b5acbe9475"
+    GUN_BUDDIES = "dd3bf334-87f3-40bd-b043-682a57a8dc3a"
+    CARDS = "3f296c07-64c3-494c-923b-fe692a4fa1bd"
+    SKINS = "e7c63390-eda7-46e0-bb7a-a6abdacd2433"
+    SKIN_VARIANTS = "3ad1b2b2-acdb-4524-852f-954a76ddae0a"
+    TITLES = "de7caa6b-adf7-4588-bbd1-143831e786c6"
+
 # ------------ Game State Models ------------
 
 
