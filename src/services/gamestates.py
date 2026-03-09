@@ -16,6 +16,7 @@ from services.event_bus import EventBus, Event
 from utils.models import (
     EndpointURI,
     GameStateTransition,
+    PlayerLoadoutResponse,
     Presence,
     PresencePrivate,
     PresenceWebsocketEvent,
@@ -43,7 +44,7 @@ class GamestateHandler:
         self.bus: EventBus = bus
         self._session: RiotSession | None = None
         self._current_state: SessionLoopState | None = None
-        self._baseline_loadout: dict[str, Any] | None = None  # pyright: ignore[reportExplicitAny]
+        self._loadout_version: int | None = None
         self._register()
 
     @property
@@ -129,8 +130,9 @@ class GamestateHandler:
         - XP progress
         """
         assert self._session is not None
-        # TODO: Implement
-        pass
+        await self._check_loadout()
+
+        # TODO: Handle loadout change (emit event, collect diff, etc.)
 
     async def _on_enter_pregame(self, transition: GameStateTransition) -> None:
         """Player entered agent select.
@@ -190,3 +192,26 @@ class GamestateHandler:
             logger.info("Gamestate tracker reset")
         self._session = None
         self._current_state = None
+        self._loadout_version = None
+
+    async def _check_loadout(self) -> None:
+        """Checks whether the user has updated their own loadout in the MENUS"""
+        
+        if not self._session:
+            return
+
+        loadout: PlayerLoadoutResponse = await self._session.menus_get_loadout()
+
+        # No change
+        if loadout.Version == self._loadout_version:
+            return
+
+        previous_version = self._loadout_version
+        self._loadout_version = loadout.Version
+
+        if previous_version is None:
+            logger.info(f"Baseline loadout version set: {self._loadout_version}")
+        else:
+            logger.info(f"Loadout changed: v{previous_version} -> v{loadout.Version}")
+
+        _ = await self.bus.emit(Event.LOADOUT_UPDATED, loadout)
