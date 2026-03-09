@@ -14,20 +14,22 @@ from typing import Any
 from services.auth_service import RiotSession
 from services.event_bus import EventBus, Event
 from utils.models import (
-    EndpointURI,
     GameStateTransition,
+    ItemTypes,
+    OwnedItemsResponse,
     PlayerLoadoutResponse,
     Presence,
     PresencePrivate,
     PresenceWebsocketEvent,
     SessionLoopState,
+    _MatchPresenceData,  # pyright: ignore[reportPrivateUsage]
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 # Lookup set for quick validation
 _VALID_STATES: set[str] = {s.value for s in SessionLoopState}
-
+_ITEM_TYPE_IDS: set[str] = {s.value for s in ItemTypes}
 
 class GamestateHandler:
     """
@@ -45,6 +47,7 @@ class GamestateHandler:
         self._session: RiotSession | None = None
         self._current_state: SessionLoopState | None = None
         self._loadout_version: int | None = None
+        self._owned_item_count: int | None = None
         self._register()
 
     @property
@@ -121,7 +124,7 @@ class GamestateHandler:
             case SessionLoopState.INGAME:
                 await self._on_enter_ingame(transition)
 
-    async def _on_enter_menus(self, transition: GameStateTransition) -> None:
+    async def _on_enter_menus(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player returned to menus (e.g. match just ended).
 
         Collect post-match data here:
@@ -130,11 +133,12 @@ class GamestateHandler:
         - XP progress
         """
         assert self._session is not None
+        await self._check_owned()
         await self._check_loadout()
 
         # TODO: Handle loadout change (emit event, collect diff, etc.)
 
-    async def _on_enter_pregame(self, transition: GameStateTransition) -> None:
+    async def _on_enter_pregame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player entered agent select.
 
         Collect pre-match data here:
@@ -145,7 +149,7 @@ class GamestateHandler:
         # TODO: Implement
         pass
 
-    async def _on_enter_ingame(self, transition: GameStateTransition) -> None:
+    async def _on_enter_ingame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Match started (loading screen / gameplay).
 
         Collect live match data here:
@@ -168,7 +172,7 @@ class GamestateHandler:
         for presence in presences:
             if not isinstance(presence, Presence):
                 continue
-            if presence.puuid == self._puuid:
+            if presence.puuid == self._puuid and presence.product == "valorant":
                 return presence
 
         return None
@@ -181,7 +185,7 @@ class GamestateHandler:
             return None
 
         match_data = private.matchPresenceData
-        if match_data is None:
+        if not isinstance(match_data, _MatchPresenceData):
             return None
 
         return match_data.sessionLoopState or None
@@ -193,9 +197,14 @@ class GamestateHandler:
         self._session = None
         self._current_state = None
         self._loadout_version = None
+        self._owned_item_count = None
+
+
 
     async def _check_loadout(self) -> None:
-        """Checks whether the user has updated their own loadout in the MENUS"""
+        """Checks whether the user has updated their own loadout in the MENUS
+           Emits a LOADOUT_UPDATED event otherwise does nothing
+        """
         
         if not self._session:
             return
@@ -215,3 +224,27 @@ class GamestateHandler:
             logger.info(f"Loadout changed: v{previous_version} -> v{loadout.Version}")
 
         _ = await self.bus.emit(Event.LOADOUT_UPDATED, loadout)
+        
+    async def _check_owned(self) -> None:
+        """Checks whether the user has acquired new items.
+           Emits an OWNED_ITEMS_UPDATED event otherwise does nothing.
+        """
+        if not self._session:
+            return
+
+        owned_items: OwnedItemsResponse = await self._session.menus_get_owned()
+
+        # No change
+        if owned_items.item_count == self._owned_item_count:
+            return
+
+        previous_count = self._owned_item_count
+        self._owned_item_count = owned_items.item_count
+
+        if previous_count is None:
+            logger.info(f"Baseline owned items count set: {self._owned_item_count}")
+        else:
+            logger.info(f"Owned items changed: {previous_count} -> {self._owned_item_count}")
+
+        _ = await self.bus.emit(Event.OWNED_ITEMS_UPDATED, owned_items)
+
