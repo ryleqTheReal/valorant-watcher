@@ -9,6 +9,7 @@ stay in their own module.
 from __future__ import annotations
 
 import base64
+import json
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
@@ -227,4 +228,250 @@ class AccessTokenJWT:
         if isinstance(self.plt, dict):
             self.plt = _JWTPlatform(**self.plt)
 
-    
+@dataclass
+class WebsocketEventWrapper[T]:
+    """Wrapper for a WAMP v1.0 EVENT message: [8, topic_uri, event_payload].
+
+    Attributes:
+        opcode: WAMP message type (8 = EVENT).
+        topic:  The subscription URI that triggered this event.
+        data:   The event payload, typed per consumer.
+    """
+
+    opcode: int
+    topic: str
+    data: T
+
+    @classmethod
+    def from_raw(cls, raw: list[object]) -> WebsocketEventWrapper[T]:
+        """Parse a raw WAMP EVENT array into a typed wrapper.
+
+        Raises:
+            ValueError: If the array is too short or the opcode is not 8.
+        """
+        if len(raw) < 3:
+            raise ValueError(f"Expected at least 3 elements, got {len(raw)}")
+
+        opcode = raw[0]
+        if opcode != 8:
+            raise ValueError(f"Expected WAMP EVENT opcode 8, got {opcode}")
+
+        return cls(opcode=int(opcode), topic=str(raw[1]), data=raw[2])  # pyright: ignore[reportArgumentType]
+
+
+# ------------ Presence Models ------------
+
+
+@dataclass
+class _PremierPresenceData:
+    rosterId: str = ""
+    rosterName: str = ""
+    rosterTag: str = ""
+    rosterType: str = ""
+    division: int = 0
+    score: int = 0
+    plating: int = 0
+    showAura: bool = False
+    showTag: bool = False
+    showPlating: bool = False
+
+
+@dataclass
+class _MatchPresenceData:
+    sessionLoopState: str = ""
+    provisioningFlow: str = ""
+    matchMap: str = ""
+    queueId: str = ""
+
+
+@dataclass
+class _PartyPresenceData:
+    partyId: str = ""
+    isPartyOwner: bool = False
+    partyState: str = ""
+    partyAccessibility: str = ""
+    partyLFM: bool = False
+    partyClientVersion: str = ""
+    partyVersion: int = 0
+    partySize: int = 0
+    queueEntryTime: str = ""
+    isPartyCrossPlayEnabled: bool = False
+    isPlayerCrossPlayEnabled: bool = False
+    partyPrecisePlatformTypes: int = 0
+    customGameName: str = ""
+    customGameTeam: str = ""
+    maxPartySize: int = 5
+    tournamentId: str = ""
+    rosterId: str = ""
+    partyOwnerSessionLoopState: str = ""
+    partyOwnerMatchMap: str = ""
+    partyOwnerProvisioningFlow: str = ""
+    partyOwnerMatchScoreAllyTeam: int = 0
+    partyOwnerMatchScoreEnemyTeam: int = 0
+    activityId: str = ""
+
+
+@dataclass
+class _PlayerPresenceData:
+    playerCardId: str = ""
+    playerTitleId: str = ""
+    accountLevel: int = 0
+    competitiveTier: int = 0
+    leaderboardPosition: int = 0
+
+
+@dataclass
+class PresencePrivate:
+    """Decoded base64 JSON from the 'private' field of a presence object."""
+
+    isValid: bool = False
+    isIdle: bool = False
+    queueId: str = ""
+    provisioningFlow: str = ""
+    partyId: str = ""
+    partySize: int = 0
+    maxPartySize: int = 5
+    partyOwnerMatchScoreAllyTeam: int = 0
+    partyOwnerMatchScoreEnemyTeam: int = 0
+    premierPresenceData: _PremierPresenceData | dict[str, object] | None = None
+    matchPresenceData: _MatchPresenceData | dict[str, object] | None = None
+    partyPresenceData: _PartyPresenceData | dict[str, object] | None = None
+    playerPresenceData: _PlayerPresenceData | dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.premierPresenceData, dict):
+            self.premierPresenceData = _PremierPresenceData(**self.premierPresenceData)  # pyright: ignore[reportArgumentType]
+        if isinstance(self.matchPresenceData, dict):
+            self.matchPresenceData = _MatchPresenceData(**self.matchPresenceData)  # pyright: ignore[reportArgumentType]
+        if isinstance(self.partyPresenceData, dict):
+            self.partyPresenceData = _PartyPresenceData(**self.partyPresenceData)  # pyright: ignore[reportArgumentType]
+        if isinstance(self.playerPresenceData, dict):
+            self.playerPresenceData = _PlayerPresenceData(**self.playerPresenceData)  # pyright: ignore[reportArgumentType]
+
+    @classmethod
+    def from_base64(cls, encoded: str) -> PresencePrivate:
+        """Decode a base64-encoded JSON string into a PresencePrivate."""
+        decoded: dict[str, object] = json.loads(base64.b64decode(encoded).decode())  # pyright: ignore[reportAny]
+        return cls(**decoded)  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class Presence:
+    """A single presence entry from /chat/v4/presences."""
+
+    activePlatform: str | None = None
+    actor: str | None = None
+    basic: str = ""
+    details: str | None = None
+    game_name: str = ""
+    game_tag: str = ""
+    location: str | None = None
+    msg: str | None = None
+    name: str = ""
+    packedData: object | None = None
+    parties: list[object] | None = None
+    patchline: str | None = None
+    pid: str = ""
+    platform: str | None = None
+    private: PresencePrivate | str | None = None
+    privateJwt: str | None = None
+    product: str = ""
+    puuid: str = ""
+    region: str = ""
+    resource: str = ""
+    state: str = ""
+    summary: str = ""
+    time: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.private, str) and self.private:
+            decoded = json.loads(base64.b64decode(self.private).decode())  # pyright: ignore[reportAny]
+            self.private = PresencePrivate(**decoded)  # pyright: ignore[reportAny]
+
+
+@dataclass
+class PresenceResponse:
+    """Parsed presence payload from a /chat/v4/presences event."""
+
+    presences: list[Presence] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.presences and isinstance(self.presences[0], dict):
+            self.presences = [Presence(**p) for p in self.presences]  # pyright: ignore[reportCallIssue]
+
+    @classmethod
+    def from_json(cls, data: dict[str, object]) -> PresenceResponse:
+        """Create a PresenceResponse from an API JSON dict."""
+        return cls(**data)  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class WebsocketEventEnvelope[T]:
+    """Intermediate envelope wrapping the actual event payload.
+
+    The WAMP data[2] payload contains this structure:
+        {"data": {...}, "eventType": "Update", "uri": "/chat/v4/presences"}
+    """
+
+    data: T
+    eventType: str = ""
+    uri: str = ""
+
+
+@dataclass
+class PresenceWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[PresenceResponse]]):
+    """A fully parsed WAMP presence event.
+
+    Structure: WAMP wrapper -> event envelope -> PresenceResponse -> list[Presence]
+    """
+
+    @classmethod
+    def from_raw_string(cls, raw: str) -> PresenceWebsocketEvent:
+        """Parse a raw websocket message string into a fully typed presence event."""
+        parsed: list[object] = json.loads(raw)  # pyright: ignore[reportAny]
+        wrapper = WebsocketEventWrapper.from_raw(parsed)  # pyright: ignore[reportUnknownVariableType]
+        payload: dict[str, object] = wrapper.data  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
+        presence_response = PresenceResponse(**payload.get("data", {}))  # pyright: ignore[reportCallIssue, reportUnknownMemberType]
+        envelope = WebsocketEventEnvelope(
+            data=presence_response,
+            eventType=str(payload.get("eventType", "")),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            uri=str(payload.get("uri", "")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+        )
+        return cls(opcode=wrapper.opcode, topic=wrapper.topic, data=envelope)
+
+# if __name__ == "__main__":
+#     from dataclasses import asdict
+
+#     with open(r"C:\Users\legit\Desktop\valorant-watcher\example_event.json", "r") as f:
+#         raw = json.loads(f.read())
+
+#     pp = lambda label, obj: print(f"\n{'=' * 40}\n{label}\n{'=' * 40}\n{json.dumps(asdict(obj), indent=2)}")
+
+#     # 1. Full event
+#     full_event = PresenceWebsocketEvent.from_raw_string(json.dumps(raw))
+#     pp("PresenceWebsocketEvent", full_event)
+
+#     # 2. WebsocketEventWrapper (raw WAMP message)
+#     wrapper = WebsocketEventWrapper.from_raw(raw)
+#     pp("WebsocketEventWrapper", wrapper)
+
+#     # 3. WebsocketEventEnvelope
+#     envelope_data: dict[str, object] = wrapper.data  
+#     envelope = WebsocketEventEnvelope(
+#         data=envelope_data.get("data", {}),
+#         eventType=str(envelope_data.get("eventType", "")),
+#         uri=str(envelope_data.get("uri", "")),
+#     )
+#     pp("WebsocketEventEnvelope", envelope)
+
+#     # 4. PresenceResponse
+#     presence_response = PresenceResponse(**envelope.data)
+#     pp("PresenceResponse", presence_response)
+
+#     # 5. Single Presence
+#     presence = presence_response.presences[0]  
+#     pp("Presence", presence)
+
+#     # 6. PresencePrivate
+#     pp("PresencePrivate", presence.private) 
+
