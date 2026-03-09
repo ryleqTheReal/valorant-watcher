@@ -31,8 +31,10 @@ class Event(Enum):
     WEBSOCKET_EVENT = "WEBSOCKET_EVENT"         # Raw event from Riot Client WebSocket
     GAME_STATE_CHANGED = "GAME_STATE_CHANGED"   # sessionLoopState transition detected
     SHUTDOWN = "SHUTDOWN"                       # App is shutting down
+    LOADOUT_UPDATED = "LOADOUT_UPDATED"         # User has updated their own equipped loadout
+    OWNED_ITEMS_UPDATED = "OWNED_ITEMS_UPDATED" # User has acquired or lost items
 
-IGNORE_EVENTS = ["AUTH_SUCCESS", "WEBSOCKET_EVENT"]
+IGNORE_EVENTS = ["AUTH_SUCCESS", "WEBSOCKET_EVENT", "LOADOUT_UPDATED", "OWNED_ITEMS_UPDATED"]
 
 @dataclass
 class Listener:
