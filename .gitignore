@@ -5,3 +5,7 @@ test
 tempCodeRunnerFile.py
 .claude/
 ws_dump.json
+
+menus*.json
+ingame*.json
+pregame*.json
