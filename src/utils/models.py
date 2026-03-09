@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
+from enum import Enum
 from typing import Any, Literal, TypeVar
 
 from urllib.parse import urlparse, ParseResult
@@ -438,6 +439,35 @@ class PresenceWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[Presen
             uri=str(payload.get("uri", "")),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
         )
         return cls(opcode=wrapper.opcode, topic=wrapper.topic, data=envelope)
+
+
+# ------------ Game State Models ------------
+
+
+class SessionLoopState(Enum):
+    """Relevant session loop states from presence data."""
+
+    MENUS = "MENUS"
+    PREGAME = "PREGAME"
+    INGAME = "INGAME"
+
+
+@dataclass(frozen=True)
+class GameStateTransition:
+    """Payload emitted with GAME_STATE_CHANGED events.
+
+    Attributes:
+        previous: The previous loop state (None on first detection).
+        current:  The new loop state.
+        puuid:    The player's UUID.
+        presence: The full presence object that triggered the transition.
+    """
+
+    previous: SessionLoopState | None
+    current: SessionLoopState
+    puuid: str
+    presence: Presence
+
 
 # if __name__ == "__main__":
 #     from dataclasses import asdict

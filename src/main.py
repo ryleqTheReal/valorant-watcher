@@ -13,6 +13,7 @@ from services.event_bus import EventBus, Event
 from services.launch_observer import ProcessWatcher
 from services.auth_service import AuthHandler
 from services.gamesocket import GameSocketHandler
+from services.gamestates import GamestateHandler
 from services.config_manager import ConfigManager
 
 from utils.file_utils import get_config_path
@@ -34,6 +35,7 @@ class ValorantStatsApp:
         self.watcher: ProcessWatcher = ProcessWatcher(self.bus, self.cfg.config.poll_interval)
         self.auth: AuthHandler = AuthHandler(self.bus)
         self.gamesocket: GameSocketHandler = GameSocketHandler(self.bus)
+        self.gamestates: GamestateHandler = GamestateHandler(self.bus)
 
     async def run(self) -> None:
         """Start the app and block until a shutdown signal is received."""

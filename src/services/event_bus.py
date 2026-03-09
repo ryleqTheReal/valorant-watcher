@@ -29,6 +29,7 @@ class Event(Enum):
     DATA_SENT = "DATA_SENT"                     # Data sent to remote server
     DATA_QUEUED = "DATA_QUEUED"                 # Data queued locally (offline)
     WEBSOCKET_EVENT = "WEBSOCKET_EVENT"         # Raw event from Riot Client WebSocket
+    GAME_STATE_CHANGED = "GAME_STATE_CHANGED"   # sessionLoopState transition detected
     SHUTDOWN = "SHUTDOWN"                       # App is shutting down
 
 IGNORE_EVENTS = ["AUTH_SUCCESS", "WEBSOCKET_EVENT"]
