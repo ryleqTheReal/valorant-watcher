@@ -17,7 +17,7 @@ import logging
 from typing import Any
 
 from services.event_bus import Event, EventBus
-from utils.models import LockfileData
+from utils.models import LockfileData, PresenceWebsocketEvent
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -83,17 +83,15 @@ class GameSocket:
         """Parse a WAMP message and emit events to the main loop."""
 
         try:
-            data: tuple[int, str, dict[str, Any]] = json.loads(raw)  # pyright: ignore[reportExplicitAny, reportAny]
+            data: PresenceWebsocketEvent = PresenceWebsocketEvent.from_raw_string(raw=str(raw))
         except (json.JSONDecodeError, TypeError):
             logger.debug(f"Non-JSON websocket message: {raw[:200] if raw else raw}")
             return
 
-        # WAMP event: [8, topic, payload]
-        if isinstance(data, list) and len(data) >= 3 and data[0] == 8:
-            _ = asyncio.run_coroutine_threadsafe(
-                self.bus.emit(Event.WEBSOCKET_EVENT, data[2]),
-                self.main_loop,
-            )
+        _ = asyncio.run_coroutine_threadsafe(
+            self.bus.emit(Event.WEBSOCKET_EVENT, data),
+            self.main_loop,
+        )
 
     def close(self) -> None:
         """Signal the websocket listener to stop."""
