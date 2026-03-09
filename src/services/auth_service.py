@@ -24,7 +24,7 @@ from jwt import decode as jwt_decode, DecodeError  # pyright: ignore[reportUnkno
 from requests import Response
 
 from services.event_bus import EventBus, Event
-from utils.models import AccessTokenJWT, EntitlementsTokenResponse, LockfileData, EndpointURI, RegionInfo, ValorantApiResponse, VersionData
+from utils.models import AccessTokenJWT, EntitlementsTokenResponse, LockfileData, EndpointURI, OwnedItemsResponse, PlayerLoadoutResponse, RegionInfo, ValorantApiResponse, VersionData
 from utils.file_utils import get_recent_log_path
 from utils.exceptions import RegionNotFoundError, FallbackApiError, VersionNotFoundError
 
@@ -430,6 +430,19 @@ class RiotSession:
         except Exception as e:
             raise VersionNotFoundError() from e
 
+    # ------------------- API Wrappers -------------------
+
+    async def menus_get_loadout(self) -> PlayerLoadoutResponse:
+        """Fetch the player's current loadout (skins, sprays, identity)."""
+        response = await self.fetch("GET", "pd", EndpointURI(f"/personalization/v2/players/{self.puuid}/playerloadout"))
+        return PlayerLoadoutResponse(**response.json())  # pyright: ignore[reportAny]
+
+    async def menus_get_owned(self, itemTypeId: str | None = None) -> OwnedItemsResponse:
+        """Fetch the player's currently owned items (skins, sprays, cards, titles, agents, buddies, skin variants)"""
+        path = f"/store/v1/entitlements/{self.puuid}/{itemTypeId}" if itemTypeId else f"/store/v1/entitlements/{self.puuid}"
+        response = await self.fetch("GET", "pd", EndpointURI(path))
+        return OwnedItemsResponse(**response.json())  # pyright: ignore[reportAny]
+    
 class AuthHandler:
     """
     Manages the auth lifecycle based on event bus events.
