@@ -34,8 +34,16 @@ class Event(Enum):
     LOADOUT_UPDATED = "LOADOUT_UPDATED"         # User has updated their own equipped loadout
     OWNED_ITEMS_UPDATED = "OWNED_ITEMS_UPDATED" # User has acquired or lost items
     USER_XP_UPDATED = "USER_XP_UPDATED"         # The user's XP has been updated
+    PENALTIES_UPDATED = "PENALTIES_UPDATED"     # Emitted when the user's penalties updated
 
-IGNORE_EVENTS = ["AUTH_SUCCESS", "WEBSOCKET_EVENT", "LOADOUT_UPDATED", "OWNED_ITEMS_UPDATED"]
+IGNORE_EVENTS = [
+    "AUTH_SUCCESS", 
+    "WEBSOCKET_EVENT", 
+    "LOADOUT_UPDATED", 
+    "OWNED_ITEMS_UPDATED", 
+    "USER_XP_UPDATED", 
+    "PENALTIES_UPDATED"
+    ]
 
 @dataclass
 class Listener:
