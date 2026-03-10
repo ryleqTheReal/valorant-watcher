@@ -16,7 +16,7 @@ from services.gamesocket import GameSocketHandler
 from services.gamestates import GamestateHandler
 from services.config_manager import ConfigManager
 
-from utils.file_utils import get_config_path
+from utils.file_utils import get_config_path, get_watermark_path
 
 
 logging.basicConfig(
@@ -37,6 +37,7 @@ class ValorantStatsApp:
         self.gamesocket: GameSocketHandler = GameSocketHandler(self.bus)
         self.gamestates: GamestateHandler = GamestateHandler(
             self.bus,
+            watermark_path=get_watermark_path(),
             ratelimit_offset=self.cfg.config.ratelimit_offset,
             initial_limit=self.cfg.config.ratelimit_initial_limit,
             sustained_limit=self.cfg.config.ratelimit_sustained_limit,
