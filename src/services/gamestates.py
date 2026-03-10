@@ -9,15 +9,14 @@ and emits labeled DATA_COLLECTED events for downstream transport.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
+from collections.abc import Awaitable
 
 from services.auth_service import RiotSession
 from services.event_bus import EventBus, Event
 from utils.models import (
     GameStateTransition,
     ItemTypes,
-    OwnedItemsResponse,
-    PlayerLoadoutResponse,
     Presence,
     PresencePrivate,
     PresenceWebsocketEvent,
@@ -161,6 +160,40 @@ class GamestateHandler:
         # TODO: Implement
         pass
 
+    # ------------------- Boilerplate -------------------
+
+    async def _check_and_emit[T](
+        self,
+        fetch: Callable[[], Awaitable[T]],
+        get_key: Callable[[T], Any],  # pyright: ignore[reportExplicitAny]
+        cache_attr: str,
+        event: Event,
+        label: str,
+    ) -> None:
+        """Generic check-diff-emit pattern.
+
+        Fetches data, compares a key value against the cached one,
+        and emits an event if it changed.
+        """
+        if not self._session:
+            return
+
+        data: T = await fetch()
+        new_key: Any = get_key(data)  # pyright: ignore[reportExplicitAny, reportAny]
+        old_key: Any = getattr(self, cache_attr)  # pyright: ignore[reportExplicitAny, reportAny]
+
+        if new_key == old_key:
+            return
+
+        setattr(self, cache_attr, new_key)
+
+        if old_key is None:
+            logger.info(f"Baseline {label} set: {new_key}")
+        else:
+            logger.info(f"{label} changed: {old_key} -> {new_key}")
+
+        _ = await self.bus.emit(event, data)
+
     # ------------------- Helpers -------------------
 
     def _find_own_presence(self, event: PresenceWebsocketEvent) -> Presence | None:
@@ -202,49 +235,24 @@ class GamestateHandler:
 
 
     async def _check_loadout(self) -> None:
-        """Checks whether the user has updated their own loadout in the MENUS
-           Emits a LOADOUT_UPDATED event otherwise does nothing
-        """
-        
-        if not self._session:
-            return
+        """Checks whether the user has updated their loadout."""
+        assert self._session is not None
+        await self._check_and_emit(
+            fetch=self._session.menus_get_loadout,
+            get_key=lambda loadout: loadout.Version,
+            cache_attr="_loadout_version",
+            event=Event.LOADOUT_UPDATED,
+            label="loadout version",
+        )
 
-        loadout: PlayerLoadoutResponse = await self._session.menus_get_loadout()
-
-        # No change
-        if loadout.Version == self._loadout_version:
-            return
-
-        previous_version = self._loadout_version
-        self._loadout_version = loadout.Version
-
-        if previous_version is None:
-            logger.info(f"Baseline loadout version set: {self._loadout_version}")
-        else:
-            logger.info(f"Loadout changed: v{previous_version} -> v{loadout.Version}")
-
-        _ = await self.bus.emit(Event.LOADOUT_UPDATED, loadout)
-        
     async def _check_owned(self) -> None:
-        """Checks whether the user has acquired new items.
-           Emits an OWNED_ITEMS_UPDATED event otherwise does nothing.
-        """
-        if not self._session:
-            return
-
-        owned_items: OwnedItemsResponse = await self._session.menus_get_owned()
-
-        # No change
-        if owned_items.item_count == self._owned_item_count:
-            return
-
-        previous_count = self._owned_item_count
-        self._owned_item_count = owned_items.item_count
-
-        if previous_count is None:
-            logger.info(f"Baseline owned items count set: {self._owned_item_count}")
-        else:
-            logger.info(f"Owned items changed: {previous_count} -> {self._owned_item_count}")
-
-        _ = await self.bus.emit(Event.OWNED_ITEMS_UPDATED, owned_items)
+        """Checks whether the user has acquired new items."""
+        assert self._session is not None
+        await self._check_and_emit(
+            fetch=self._session.menus_get_owned,
+            get_key=lambda ownedItems: ownedItems.item_count,
+            cache_attr="_owned_item_count",
+            event=Event.OWNED_ITEMS_UPDATED,
+            label="owned items count",
+        )
 
