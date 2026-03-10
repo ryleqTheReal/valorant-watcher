@@ -178,7 +178,12 @@ class GamestateHandler:
         if not self._session:
             return
 
-        data: T = await fetch()
+        try:
+            data: T = await fetch()
+        except Exception as e:
+            logger.warning(f"Failed to fetch {label}: {e}")
+            return
+
         new_key: Any = get_key(data)  # pyright: ignore[reportExplicitAny, reportAny]
         old_key: Any = getattr(self, cache_attr)  # pyright: ignore[reportExplicitAny, reportAny]
 
