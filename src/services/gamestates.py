@@ -15,6 +15,7 @@ from collections.abc import Awaitable
 
 from services.auth_service import RiotSession
 from services.event_bus import EventBus, Event
+from services.request_scheduler import RequestScheduler
 from utils.models import (
     GameStateTransition,
     ItemTypes,
@@ -48,6 +49,7 @@ class GamestateHandler:
         self._session: RiotSession | None = None
         self._current_state: SessionLoopState | None = None
         self._pending_task: asyncio.Task[None] | None = None
+        self._scheduler: RequestScheduler = RequestScheduler()
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
@@ -71,6 +73,7 @@ class GamestateHandler:
     async def _on_auth_success(self, data: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
         """Store the authenticated session for API access."""
         self._session = data["session"]
+        self._scheduler.start()
         logger.info(f"Gamestate tracker ready for puuid {self._puuid}")
 
     async def _on_websocket_event(self, data: PresenceWebsocketEvent) -> None:
@@ -120,58 +123,74 @@ class GamestateHandler:
     # ------------------- State Change Dispatch -------------------
 
     async def _on_state_changed(self, transition: GameStateTransition) -> None:
-        """Dispatch to the appropriate handler based on the new state."""
+        """Dispatch to the appropriate handler based on the new state.
+
+        Cancels the pending offset-wait task and tells the scheduler to
+        purge stale state-bound requests before dispatching the new handler.
+        """
         self._cancel_pending_task()
+        # This makes the state queue be cleared and go to sleep
+        self._scheduler.on_state_change()
 
         match transition.current:
             case SessionLoopState.MENUS:
                 self._pending_task = asyncio.create_task(self._on_enter_menus(transition))
             case SessionLoopState.PREGAME:
-                await self._on_enter_pregame(transition)
+                self._pending_task = asyncio.create_task(self._on_enter_pregame(transition))
             case SessionLoopState.INGAME:
-                await self._on_enter_ingame(transition)
+                self._pending_task = asyncio.create_task(self._on_enter_ingame(transition))
 
     async def _on_enter_menus(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player returned to menus (e.g. match just ended).
 
         Waits for the rate limit offset to let other apps finish their
-        burst of requests, then collects post-match data.
+        burst of requests, then enqueues general data checks.
         """
         if not self._session:
             return
 
-        logger.info(f"Waiting {self._ratelimit_offset}s for rate limit cooldown before collecting data")
-        await asyncio.sleep(self._ratelimit_offset)
-        logger.info("Rate limit cooldown finished, collecting data")
+        await self._wait_ratelimit_offset()
 
-        await self._check_owned()
-        await self._check_loadout()
-        await self._check_xp()
-        await self._check_penalties()
-        await self._check_mmr()
+        # No state-specific requests for MENUS currently
+        self._enqueue_general_checks()
+        # This is mandatory to resume the state queue
+        self._scheduler.resume()
 
     async def _on_enter_pregame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player entered agent select.
 
-        Collect pre-match data here:
-        - Pregame match info (map, mode, players)
-        - Player loadouts / skins
+        Short window (~10s usable after offset).  State-specific requests
+        run first so we don't waste the window on general data.
         """
-        assert self._session is not None
-        # TODO: Implement
-        pass
+        if not self._session:
+            return
+
+        await self._wait_ratelimit_offset()
+
+        # TODO: Enqueue state-specific pregame requests (high priority)
+        # e.g. self._scheduler.enqueue_state(self._check_pregame_match, "pregame match")
+
+        self._enqueue_general_checks()
+        # This is mandatory to resume the state queue
+        self._scheduler.resume()
 
     async def _on_enter_ingame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Match started (loading screen / gameplay).
 
-        Collect live match data here:
-        - Current game match info
-        - Player loadouts for the round
-        - Hardware / performance stats
+        State-specific requests (core-game data) run first, then
+        general checks fill the remaining window.
         """
-        assert self._session is not None
-        # TODO: Implement
-        pass
+        if not self._session:
+            return
+
+        await self._wait_ratelimit_offset()
+
+        # TODO: Enqueue state-specific ingame requests (high priority)
+        # e.g. self._scheduler.enqueue_state(self._check_coregame_match, "core-game match")
+
+        self._enqueue_general_checks()
+        # This is mandatory to resume the state queue
+        self._scheduler.resume()
 
     # ------------------- Boilerplate -------------------
 
@@ -211,6 +230,19 @@ class GamestateHandler:
             logger.info(f"{label} changed: {old_key} -> {new_key}")
 
         _ = await self.bus.emit(event, data)
+    
+    async def _wait_ratelimit_offset(self) -> None:
+        logger.info(f"Waiting {self._ratelimit_offset}s for rate limit cooldown before collecting data")
+        await asyncio.sleep(self._ratelimit_offset)
+        logger.info("Rate limit cooldown finished, collecting data")
+
+    def _enqueue_general_checks(self) -> None:
+        """Enqueue all general-purpose data checks (low priority)."""
+        self._scheduler.enqueue_general(self._check_owned, "owned items")
+        self._scheduler.enqueue_general(self._check_loadout, "loadout")
+        self._scheduler.enqueue_general(self._check_xp, "xp")
+        self._scheduler.enqueue_general(self._check_penalties, "penalties")
+        self._scheduler.enqueue_general(self._check_mmr, "mmr")
 
     # ------------------- Helpers -------------------
 
@@ -244,12 +276,13 @@ class GamestateHandler:
     def _cancel_pending_task(self) -> None:
         """Cancel any in-flight delayed collection task."""
         if self._pending_task and not self._pending_task.done():
-            self._pending_task.cancel()
+            _ = self._pending_task.cancel()
             logger.info("Cancelled pending data collection (state changed)")
         self._pending_task = None
 
     def _reset(self) -> None:
         """Clear all tracking state."""
+        self._scheduler.stop()
         self._cancel_pending_task()
         if self._current_state is not None:
             logger.info("Gamestate tracker reset")
@@ -263,7 +296,7 @@ class GamestateHandler:
     async def _check_loadout(self) -> None:
         """Checks whether the user has updated their loadout."""
         await self._check_and_emit(
-            fetch=self._session.menus_get_loadout,  # pyright: ignore[reportOptionalMemberAccess]
+            fetch=self._session.general_get_loadout,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda loadout: loadout.Version,
             cache_attr="_loadout_version",
             event=Event.LOADOUT_UPDATED,
@@ -273,7 +306,7 @@ class GamestateHandler:
     async def _check_owned(self) -> None:
         """Checks whether the user has acquired new items."""
         await self._check_and_emit(
-            fetch=self._session.menus_get_owned,  # pyright: ignore[reportOptionalMemberAccess]
+            fetch=self._session.general_get_owned,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda ownedItems: ownedItems.item_count,
             cache_attr="_owned_item_count",
             event=Event.OWNED_ITEMS_UPDATED,
@@ -283,7 +316,7 @@ class GamestateHandler:
     async def _check_xp(self) -> None:
         """Checks whether the user has gained XP"""
         await self._check_and_emit(
-            fetch=self._session.menus_get_xp,  # pyright: ignore[reportOptionalMemberAccess]
+            fetch=self._session.general_get_xp,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda levelData: levelData.Version,
             cache_attr="_xp_version",
             event=Event.USER_XP_UPDATED,
@@ -293,7 +326,7 @@ class GamestateHandler:
     async def _check_penalties(self) -> None:
         """Checks whether the user has new penalties"""
         await self._check_and_emit(
-            fetch=self._session.menus_get_penalties,  # pyright: ignore[reportOptionalMemberAccess]
+            fetch=self._session.general_get_penalties,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda penaltiesData: penaltiesData.Version,
             cache_attr="_penalties_version",
             event=Event.PENALTIES_UPDATED,
@@ -303,7 +336,7 @@ class GamestateHandler:
     async def _check_mmr(self) -> None:
         """Checks whether the user's MMR history has updated"""
         await self._check_and_emit(
-            fetch=self._session.menus_get_mmr,  # pyright: ignore[reportOptionalMemberAccess]
+            fetch=self._session.general_get_mmr,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda mmrData: mmrData.Version,
             cache_attr="_mmr_version",
             event=Event.MMR_HISTORY_UPDATED,
