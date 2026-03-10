@@ -577,6 +577,63 @@ class _XPHistoryEntry:
             self.XPMultipliers = [_XPMultiplier(**m) for m in self.XPMultipliers]  # pyright: ignore[reportCallIssue]
 
 @dataclass
+class _XPMultiplierEffect:
+    """XP multiplier penalty effect."""
+    XPMultiplier: float | None = None         # Multiplier applied (0 = no XP)
+
+@dataclass
+class _PenaltyEntry:
+    """A single penalty entry from the penalties endpoint."""
+    ID: str | None = None                                                           # Penalty UUID
+    IssuingGameStartUnixMillis: int | None = None                                   # Match start time (Unix ms)
+    IssuingMatchID: str | None = None                                               # Match UUID that triggered the penalty
+    Expiry: str | None = None                                                       # ISO 8601 penalty expiry time
+    GamesRemaining: int | None = None                                               # Games left under penalty
+    ApplyToAllPlatforms: bool | None = None                                         # Whether penalty applies cross-platform
+    ApplyToPlatforms: list[str] | None = None                                       # Platforms: "pc", "console"
+    ApplyToPlatformGroups: list[str] | None = None                                  # Platform groups: "pc", "console"
+    InfractionID: str | None = None                                                 # Links to the infraction that caused this
+    Origin: str | None = None                                                       # Platform where infraction occurred
+    ForgivenessIneligible: bool | None = None                                       # Whether forgiveness can apply
+    IsAutomatedDetection: bool | None = None                                        # Auto-detected vs manual report
+    PenaltyInfo: dict[str, object] | None = None                                    # Additional penalty metadata
+    DelayedPenaltyEffect: dict[str, object] | None = None                           # Delayed penalty details
+    GameBanEffect: dict[str, object] | None = None                                  # Game ban details
+    QueueDelayEffect: dict[str, object] | None = None                               # Queue delay details
+    QueueRestrictionEffect: dict[str, object] | None = None                         # Queue restriction details
+    RankedRatingPenaltyEffect: dict[str, object] | None = None                      # RR penalty details
+    RiotRestrictionEffect: dict[str, object] | None = None                          # Riot restriction details
+    RMSNotifyEffect: dict[str, object] | None = None                                # RMS notification details
+    WarningEffect: dict[str, object] | None = None                                  # Warning details
+    XPMultiplierEffect: _XPMultiplierEffect | dict[str, object] | None = None       # XP multiplier penalty
+    PremierRestrictionEffect: dict[str, object] | None = None                       # Premier restriction details
+
+    def __post_init__(self) -> None:
+        if isinstance(self.XPMultiplierEffect, dict):
+            self.XPMultiplierEffect = _XPMultiplierEffect(**self.XPMultiplierEffect)  # pyright: ignore[reportArgumentType]
+
+@dataclass
+class _InfractionEntry:
+    """A single infraction entry describing the rule violation."""
+    ID: str | None = None                     # Infraction UUID (referenced by PenaltyEntry.InfractionID)
+    Name: str | None = None                   # Infraction type: "AFK_SEVERE_NONDISRUPTIVE", "NONPARTICIPATION_COMBAT_NONDISRUPTIVE"
+    RatingName: str | None = None             # Rating category: "afk", "damageParticipationOutgoingNonDisruptive"
+
+@dataclass
+class PenaltiesResponse:
+    """Response from GET /restrictions/v3/penalties"""
+    Subject: str | None = None                                                              # Player UUID (PUUID)
+    Penalties: list[_PenaltyEntry] | list[dict[str, object]] | None = None                  # Active penalties
+    Infractions: list[_InfractionEntry] | list[dict[str, object]] | None = None             # Infractions that triggered the penalties
+    Version: int | None = None                                                              # Schema version
+
+    def __post_init__(self) -> None:
+        if self.Penalties and isinstance(self.Penalties[0], dict):
+            self.Penalties = [_PenaltyEntry(**p) for p in self.Penalties]  # pyright: ignore[reportCallIssue]
+        if self.Infractions and isinstance(self.Infractions[0], dict):
+            self.Infractions = [_InfractionEntry(**i) for i in self.Infractions]  # pyright: ignore[reportCallIssue]
+
+@dataclass
 class AccountXPResponse:
     """Response from GET /account-xp/v1/players/{puuid}"""
     Version: int | None = None                                                      # Schema version
