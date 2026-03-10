@@ -72,6 +72,8 @@ class GameSocket:
 
                         except asyncio.TimeoutError:
                             continue  # No message, check stop flag and loop back
+                        except UnicodeDecodeError:
+                            logger.debug("Skipping non-UTF-8 binary websocket frame")
 
                     logger.info("WebSocket connection closed")
                     return
