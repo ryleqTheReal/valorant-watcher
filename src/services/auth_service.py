@@ -24,7 +24,7 @@ from jwt import decode as jwt_decode, DecodeError  # pyright: ignore[reportUnkno
 from requests import Response
 
 from services.event_bus import EventBus, Event
-from utils.models import AccessTokenJWT, AccountXPResponse, EntitlementsTokenResponse, LockfileData, EndpointURI, OwnedItemsResponse, PenaltiesResponse, PlayerLoadoutResponse, RegionInfo, ValorantApiResponse, VersionData
+from utils.models import AccessTokenJWT, AccountXPResponse, EntitlementsTokenResponse, LockfileData, EndpointURI, OwnedItemsResponse, PenaltiesResponse, PlayerLoadoutResponse, PlayerMMRResponse, RegionInfo, ValorantApiResponse, VersionData
 from utils.file_utils import get_recent_log_path
 from utils.exceptions import RegionNotFoundError, FallbackApiError, VersionNotFoundError
 
@@ -453,6 +453,10 @@ class RiotSession:
         response = await self.fetch("GET", "pd", EndpointURI("/restrictions/v3/penalties"))
         return PenaltiesResponse(**response.json())  # pyright: ignore[reportAny]
         
+    async def menus_get_mmr(self) -> PlayerMMRResponse:
+        """Fetch the player's current MMR history"""
+        response = await self.fetch("GET", "pd", EndpointURI(f"/mmr/v1/players/{self.puuid}"))
+        return PlayerMMRResponse(**response.json())  # pyright: ignore[reportAny]
     
 class AuthHandler:
     """
