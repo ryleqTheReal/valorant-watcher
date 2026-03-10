@@ -35,6 +35,7 @@ class Event(Enum):
     OWNED_ITEMS_UPDATED = "OWNED_ITEMS_UPDATED" # User has acquired or lost items
     USER_XP_UPDATED = "USER_XP_UPDATED"         # The user's XP has been updated
     PENALTIES_UPDATED = "PENALTIES_UPDATED"     # Emitted when the user's penalties updated
+    MMR_HISTORY_UPDATED = "MMR_HISTORY_UPDATED" # The player's MMR history has updated 
 
 IGNORE_EVENTS = [
     "AUTH_SUCCESS", 
@@ -42,7 +43,8 @@ IGNORE_EVENTS = [
     "LOADOUT_UPDATED", 
     "OWNED_ITEMS_UPDATED", 
     "USER_XP_UPDATED", 
-    "PENALTIES_UPDATED"
+    "PENALTIES_UPDATED",
+    "MMR_HISTORY_UPDATED"
     ]
 
 @dataclass
