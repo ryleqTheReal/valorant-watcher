@@ -49,6 +49,7 @@ class GamestateHandler:
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
         self._penalties_version: int | None = None
+        self._mmr_version: int | None = None
         self._register()
 
     @property
@@ -127,19 +128,14 @@ class GamestateHandler:
 
     async def _on_enter_menus(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player returned to menus (e.g. match just ended).
-
-        Collect post-match data here:
-        - Match history / last match result
-        - Updated MMR / rank
-        - XP progress
+           Collect post-match data here
         """
         assert self._session is not None
         await self._check_owned()
         await self._check_loadout()
         await self._check_xp()
         await self._check_penalties()
-
-        # TODO: Handle loadout change (emit event, collect diff, etc.)
+        await self._check_mmr()
 
     async def _on_enter_pregame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player entered agent select.
@@ -276,4 +272,14 @@ class GamestateHandler:
             cache_attr="_penalties_version",
             event=Event.PENALTIES_UPDATED,
             label="user penalties version",
+        )
+    
+    async def _check_mmr(self) -> None:
+        """Checks whether the user's MMR history has updated"""
+        await self._check_and_emit(
+            fetch=self._session.menus_get_mmr,  # pyright: ignore[reportOptionalMemberAccess]
+            get_key=lambda mmrData: mmrData.Version,
+            cache_attr="_mmr_version",
+            event=Event.MMR_HISTORY_UPDATED,
+            label="user mmr version"
         )
