@@ -24,7 +24,7 @@ from jwt import decode as jwt_decode, DecodeError  # pyright: ignore[reportUnkno
 from requests import Response
 
 from services.event_bus import EventBus, Event
-from utils.models import AccessTokenJWT, AccountXPResponse, EntitlementsTokenResponse, LockfileData, EndpointURI, OwnedItemsResponse, PlayerLoadoutResponse, RegionInfo, ValorantApiResponse, VersionData
+from utils.models import AccessTokenJWT, AccountXPResponse, EntitlementsTokenResponse, LockfileData, EndpointURI, OwnedItemsResponse, PenaltiesResponse, PlayerLoadoutResponse, RegionInfo, ValorantApiResponse, VersionData
 from utils.file_utils import get_recent_log_path
 from utils.exceptions import RegionNotFoundError, FallbackApiError, VersionNotFoundError
 
@@ -448,6 +448,11 @@ class RiotSession:
         response = await self.fetch("GET", "pd", EndpointURI(f"/account-xp/v1/players/{self.puuid}"))
         return AccountXPResponse(**response.json())  # pyright: ignore[reportAny]
 
+    async def menus_get_penalties(self) -> PenaltiesResponse:
+        """Fetch the player's current penalties"""
+        response = await self.fetch("GET", "pd", EndpointURI("/restrictions/v3/penalties"))
+        return PenaltiesResponse(**response.json())  # pyright: ignore[reportAny]
+        
     
 class AuthHandler:
     """
