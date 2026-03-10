@@ -43,13 +43,22 @@ class GamestateHandler:
     - SHUTDOWN          -> resets state
     """
 
-    def __init__(self, bus: EventBus, ratelimit_offset: int = 60) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        ratelimit_offset: int = 60,
+        initial_limit: int = 6,
+        sustained_limit: int = 20,
+    ) -> None:
         self.bus: EventBus = bus
         self._ratelimit_offset: int = ratelimit_offset
         self._session: RiotSession | None = None
         self._current_state: SessionLoopState | None = None
         self._pending_task: asyncio.Task[None] | None = None
-        self._scheduler: RequestScheduler = RequestScheduler()
+        self._scheduler: RequestScheduler = RequestScheduler(
+            initial_limit=initial_limit,
+            sustained_limit=sustained_limit,
+        )
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
