@@ -48,6 +48,7 @@ class GamestateHandler:
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
+        self._penalties_version: int | None = None
         self._register()
 
     @property
@@ -136,6 +137,7 @@ class GamestateHandler:
         await self._check_owned()
         await self._check_loadout()
         await self._check_xp()
+        await self._check_penalties()
 
         # TODO: Handle loadout change (emit event, collect diff, etc.)
 
@@ -266,3 +268,12 @@ class GamestateHandler:
             label="user xp version",
         )
 
+    async def _check_penalties(self) -> None:
+        """Checks whether the user has new penalties"""
+        await self._check_and_emit(
+            fetch=self._session.menus_get_penalties,  # pyright: ignore[reportOptionalMemberAccess]
+            get_key=lambda penaltiesData: penaltiesData.Version,
+            cache_attr="_penalties_version",
+            event=Event.PENALTIES_UPDATED,
+            label="user penalties version",
+        )
