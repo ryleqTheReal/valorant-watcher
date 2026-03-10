@@ -47,6 +47,7 @@ class GamestateHandler:
         self._current_state: SessionLoopState | None = None
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
+        self._xp_version: int | None = None
         self._register()
 
     @property
@@ -134,6 +135,7 @@ class GamestateHandler:
         assert self._session is not None
         await self._check_owned()
         await self._check_loadout()
+        await self._check_xp()
 
         # TODO: Handle loadout change (emit event, collect diff, etc.)
 
@@ -236,9 +238,8 @@ class GamestateHandler:
 
     async def _check_loadout(self) -> None:
         """Checks whether the user has updated their loadout."""
-        assert self._session is not None
         await self._check_and_emit(
-            fetch=self._session.menus_get_loadout,
+            fetch=self._session.menus_get_loadout,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda loadout: loadout.Version,
             cache_attr="_loadout_version",
             event=Event.LOADOUT_UPDATED,
@@ -247,12 +248,21 @@ class GamestateHandler:
 
     async def _check_owned(self) -> None:
         """Checks whether the user has acquired new items."""
-        assert self._session is not None
         await self._check_and_emit(
-            fetch=self._session.menus_get_owned,
+            fetch=self._session.menus_get_owned,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda ownedItems: ownedItems.item_count,
             cache_attr="_owned_item_count",
             event=Event.OWNED_ITEMS_UPDATED,
             label="owned items count",
+        )
+    
+    async def _check_xp(self) -> None:
+        """Checks whether the user has gained XP"""
+        await self._check_and_emit(
+            fetch=self._session.menus_get_xp,  # pyright: ignore[reportOptionalMemberAccess]
+            get_key=lambda levelData: levelData.Version,
+            cache_attr="_xp_version",
+            event=Event.USER_XP_UPDATED,
+            label="user xp version",
         )
 
