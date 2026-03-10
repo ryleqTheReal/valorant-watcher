@@ -432,28 +432,28 @@ class RiotSession:
 
     # ------------------- API Wrappers -------------------
 
-    async def menus_get_loadout(self) -> PlayerLoadoutResponse:
+    async def general_get_loadout(self) -> PlayerLoadoutResponse:
         """Fetch the player's current loadout (skins, sprays, identity)."""
         response = await self.fetch("GET", "pd", EndpointURI(f"/personalization/v2/players/{self.puuid}/playerloadout"))
         return PlayerLoadoutResponse(**response.json())  # pyright: ignore[reportAny]
 
-    async def menus_get_owned(self, itemTypeId: str | None = None) -> OwnedItemsResponse:
+    async def general_get_owned(self, itemTypeId: str | None = None) -> OwnedItemsResponse:
         """Fetch the player's currently owned items (skins, sprays, cards, titles, agents, buddies, skin variants)"""
         path = f"/store/v1/entitlements/{self.puuid}/{itemTypeId}" if itemTypeId else f"/store/v1/entitlements/{self.puuid}"
         response = await self.fetch("GET", "pd", EndpointURI(path))
         return OwnedItemsResponse(**response.json())  # pyright: ignore[reportAny]
     
-    async def menus_get_xp(self) -> AccountXPResponse:
+    async def general_get_xp(self) -> AccountXPResponse:
         """Fetch the player's current XP history"""
         response = await self.fetch("GET", "pd", EndpointURI(f"/account-xp/v1/players/{self.puuid}"))
         return AccountXPResponse(**response.json())  # pyright: ignore[reportAny]
 
-    async def menus_get_penalties(self) -> PenaltiesResponse:
+    async def general_get_penalties(self) -> PenaltiesResponse:
         """Fetch the player's current penalties"""
         response = await self.fetch("GET", "pd", EndpointURI("/restrictions/v3/penalties"))
         return PenaltiesResponse(**response.json())  # pyright: ignore[reportAny]
         
-    async def menus_get_mmr(self) -> PlayerMMRResponse:
+    async def general_get_mmr(self) -> PlayerMMRResponse:
         """Fetch the player's current MMR history"""
         response = await self.fetch("GET", "pd", EndpointURI(f"/mmr/v1/players/{self.puuid}"))
         return PlayerMMRResponse(**response.json())  # pyright: ignore[reportAny]
