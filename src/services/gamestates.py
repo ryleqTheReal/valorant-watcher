@@ -8,6 +8,7 @@ and emits labeled DATA_COLLECTED events for downstream transport.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable
 from collections.abc import Awaitable
@@ -41,10 +42,12 @@ class GamestateHandler:
     - SHUTDOWN          -> resets state
     """
 
-    def __init__(self, bus: EventBus) -> None:
+    def __init__(self, bus: EventBus, ratelimit_offset: int = 60) -> None:
         self.bus: EventBus = bus
+        self._ratelimit_offset: int = ratelimit_offset
         self._session: RiotSession | None = None
         self._current_state: SessionLoopState | None = None
+        self._pending_task: asyncio.Task[None] | None = None
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
@@ -118,9 +121,11 @@ class GamestateHandler:
 
     async def _on_state_changed(self, transition: GameStateTransition) -> None:
         """Dispatch to the appropriate handler based on the new state."""
+        self._cancel_pending_task()
+
         match transition.current:
             case SessionLoopState.MENUS:
-                await self._on_enter_menus(transition)
+                self._pending_task = asyncio.create_task(self._on_enter_menus(transition))
             case SessionLoopState.PREGAME:
                 await self._on_enter_pregame(transition)
             case SessionLoopState.INGAME:
@@ -128,9 +133,17 @@ class GamestateHandler:
 
     async def _on_enter_menus(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player returned to menus (e.g. match just ended).
-           Collect post-match data here
+
+        Waits for the rate limit offset to let other apps finish their
+        burst of requests, then collects post-match data.
         """
-        assert self._session is not None
+        if not self._session:
+            return
+
+        logger.info(f"Waiting {self._ratelimit_offset}s for rate limit cooldown before collecting data")
+        await asyncio.sleep(self._ratelimit_offset)
+        logger.info("Rate limit cooldown finished, collecting data")
+
         await self._check_owned()
         await self._check_loadout()
         await self._check_xp()
@@ -228,8 +241,16 @@ class GamestateHandler:
 
         return match_data.sessionLoopState or None
 
+    def _cancel_pending_task(self) -> None:
+        """Cancel any in-flight delayed collection task."""
+        if self._pending_task and not self._pending_task.done():
+            self._pending_task.cancel()
+            logger.info("Cancelled pending data collection (state changed)")
+        self._pending_task = None
+
     def _reset(self) -> None:
         """Clear all tracking state."""
+        self._cancel_pending_task()
         if self._current_state is not None:
             logger.info("Gamestate tracker reset")
         self._session = None
@@ -237,7 +258,7 @@ class GamestateHandler:
         self._loadout_version = None
         self._owned_item_count = None
 
-
+# ---------------- Helper API Wrapper Functions ----------------
 
     async def _check_loadout(self) -> None:
         """Checks whether the user has updated their loadout."""

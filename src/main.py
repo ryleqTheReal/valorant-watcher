@@ -35,7 +35,7 @@ class ValorantStatsApp:
         self.watcher: ProcessWatcher = ProcessWatcher(self.bus, self.cfg.config.poll_interval)
         self.auth: AuthHandler = AuthHandler(self.bus)
         self.gamesocket: GameSocketHandler = GameSocketHandler(self.bus)
-        self.gamestates: GamestateHandler = GamestateHandler(self.bus)
+        self.gamestates: GamestateHandler = GamestateHandler(self.bus, self.cfg.config.ratelimit_offset)
 
     async def run(self) -> None:
         """Start the app and block until a shutdown signal is received."""

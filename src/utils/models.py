@@ -81,6 +81,7 @@ class AppConfig:
     collect_interval: int = 60
     enable_data_sending: bool = True
     ratelimit_timeout: int = 60
+    ratelimit_offset: int = 60              # Seconds to wait after state change before making API calls
 
     @classmethod
     def from_config_dict(cls, data: dict[str, object]) -> AppConfig:
