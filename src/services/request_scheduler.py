@@ -18,12 +18,100 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
 from collections.abc import Awaitable, Callable
 
 logger: logging.Logger = logging.getLogger(__name__)
+
+
+class RateLimiter:
+    """Per-minute request rate limiter with two-phase limits.
+
+    After a gamestate change (reset) the first window uses ``initial_limit``
+    (6 req in first minute) because other apps have likely consumed the bulk of the
+    30 req/min budget, the following windows use ``sustained_limit``
+    (20 req/min) to leave headroom for other apps
+
+    Call :meth:`wait_for_slot` before every outgoing request. It will
+    ``asyncio.sleep`` until the current window has enough budget
+    """
+
+    def __init__(
+        self,
+        initial_limit: int = 6,
+        sustained_limit: int = 20,
+        window_seconds: float = 60.0,
+    ) -> None:
+        self._initial_limit: int = initial_limit
+        self._sustained_limit: int = sustained_limit
+        self._window_seconds: float = window_seconds
+
+        self._current_limit: int = initial_limit
+        self._request_count: int = 0
+        self._window_start: float = 0.0
+        self._is_first_window: bool = True
+
+    # ---- public ----
+
+    def reset(self) -> None:
+        """Resets the counter and ratelimit timer when gamestate changes"""
+        
+        self._request_count = 0
+        self._window_start = 0.0
+        self._is_first_window = True
+        self._current_limit = self._initial_limit
+        logger.debug(f"rate limiter reset (next window: {self._initial_limit} req)")
+
+    async def wait_for_slot(self) -> None:
+        """Block until one request slot is available then consume it"""
+        now = time.monotonic()
+
+        # First call after reset start the window
+        if self._window_start == 0.0:
+            self._window_start = now
+            self._request_count = 0
+
+        # Roll the window forward if it has expired
+        self._slide_window_if_expired(now)
+
+        if self._request_count >= self._current_limit:
+            wait = self._window_seconds - (time.monotonic() - self._window_start)
+            if wait > 0:
+                logger.info(f"rate-limit reached {self._request_count}/{self._current_limit}: waiting {wait}s for next window")
+                await asyncio.sleep(wait)
+            self._slide_window()
+
+        self._request_count += 1
+        logger.debug(f"request {self._request_count}/{self._current_limit} in current window")
+
+    @property
+    def remaining(self) -> int:
+        """Returns the amount of requests remaining in the current window"""
+        
+        self._slide_window_if_expired(time.monotonic())
+        return max(0, self._current_limit - self._request_count) 
+
+    # -------- Internal Helpers --------
+
+    def _slide_window_if_expired(self, now: float) -> None:
+        """Checks whether the time window has expired, if it did, it slides the window"""
+        
+        elapsed = now - self._window_start
+        if elapsed >= self._window_seconds:
+            self._slide_window()
+
+    def _slide_window(self) -> None:
+        """Slides the window to the next time-frame"""
+        
+        if self._is_first_window:
+            self._is_first_window = False
+            self._current_limit = self._sustained_limit
+        self._window_start = time.monotonic()
+        self._request_count = 0
+        logger.debug(f"new rate-limit window started (ends: {self._current_limit})")
 
 
 @dataclass(slots=True)
@@ -45,7 +133,11 @@ class RequestScheduler:
     and resumed.  While paused, no requests are processed.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        initial_limit: int = 6,
+        sustained_limit: int = 20,
+    ) -> None:
         self._state_queue: deque[QueuedRequest] = deque()
         self._general_queue: deque[QueuedRequest] = deque()
 
@@ -62,6 +154,12 @@ class RequestScheduler:
         # Tracks the currently executing request so we can cancel it
         self._current_is_state: bool = False
         self._current_task: asyncio.Task[Any] | None = None  # pyright: ignore[reportExplicitAny]
+
+        # Rate limiter enforces per-minute request budgets
+        self._rate_limiter: RateLimiter = RateLimiter(
+            initial_limit=initial_limit,
+            sustained_limit=sustained_limit,
+        )
 
     # ------------------- Public API -------------------
 
@@ -111,6 +209,7 @@ class RequestScheduler:
         """
         self.pause()
         self._purge_state_queue()
+        self._rate_limiter.reset()
         if self._current_is_state:
             self._cancel_current()
 
@@ -188,6 +287,8 @@ class RequestScheduler:
             queue_type = "state" if is_state else "general"
 
             try:
+                # Wait for a rate-limit slot before executing
+                await self._rate_limiter.wait_for_slot()
                 logger.debug(f"Executing {queue_type} request: {item.label}")
                 self._current_task = asyncio.create_task(item.execute())  # pyright: ignore[reportArgumentType]
                 _ = await self._current_task  # pyright: ignore[reportAny]
