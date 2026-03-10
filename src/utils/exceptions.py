@@ -9,6 +9,8 @@ RIOT_AUTHENTICATION_ERROR = "RIOT_AUTHENTICATION_ERROR"
 REGION_NOT_FOUND_ERROR = "REGION_NOT_FOUND_ERROR"
 VERSION_NOT_FOUND_ERROR = "VERSION_NOT_FOUND_ERROR"
 FALLBACK_API_ERROR = "FALLBACK_API_ERROR"
+API_RUNTIME_ERROR = "API_RUNTIME_ERROR"
+INCORRECT_PAGINATION_ERROR = "INCORRECT_PAGINATION_ERROR"
 
 class AppError(Exception):
     """Highest exception in hierarchy from which all other exceptions stem     
@@ -93,3 +95,20 @@ class FallbackApiError(AuthenticationError):
         self.message: str = message
         self.internal_status: str = FALLBACK_API_ERROR
         
+# ------------ API Runtime Errors ------------
+ 
+class ApiRuntimeError(AppError):
+    """Generic error wrapper for anything related to API errors during runtime"""
+    def __init__(self, *args: object, message: str = "The API request could not be send due to an error") -> None:
+        super().__init__(*args)
+        self.is_critical: bool = False
+        self.message: str = message
+        self.internal_status: str = API_RUNTIME_ERROR
+        
+class IncorrectPaginationError(ApiRuntimeError):
+    """Happens when the pagination is invalid"""
+    def __init__(self, *args: object, message: str = "Invalid pagination detected before sending request") -> None:
+        super().__init__(*args)
+        self.is_critical: bool = False
+        self.message: str = message
+        self.internal_status: str = INCORRECT_PAGINATION_ERROR
