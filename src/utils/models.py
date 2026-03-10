@@ -82,6 +82,8 @@ class AppConfig:
     enable_data_sending: bool = True
     ratelimit_timeout: int = 60
     ratelimit_offset: int = 60              # Seconds to wait after state change before making API calls
+    ratelimit_initial_limit: int = 6        # Max requests in the first minute after offset ends
+    ratelimit_sustained_limit: int = 20     # Max requests per minute after the first window
 
     @classmethod
     def from_config_dict(cls, data: dict[str, object]) -> AppConfig:
@@ -755,29 +757,3 @@ class GameStateTransition:
     current: SessionLoopState
     puuid: str
     presence: Presence
-
-
-# if __name__ == "__main__":
-#     from dataclasses import asdict
-
-#     pp = lambda label, obj: print(f"\n{'=' * 40}\n{label}\n{'=' * 40}\n{json.dumps(asdict(obj), indent=2)}")
-
-#     # --- Owned Items ---
-#     with open(r"C:\Users\legit\Desktop\valorant-watcher\menus_get_owned.json", "r") as f:
-#         owned_raw = json.loads(f.read())
-
-#     owned = OwnedItemsResponse(**owned_raw)
-#     print(f"Total owned items: {owned.item_count}")
-#     print(f"Item type groups: {len(owned.EntitlementsByTypes) if owned.EntitlementsByTypes else 0}")
-
-#     for group in (owned.EntitlementsByTypes or []):
-#         if isinstance(group, _EntitlementsByType):
-#             count = len(group.Entitlements) if group.Entitlements else 0
-#             print(f"  {group.ItemTypeID}: {count} items")
-
-#     # First item of first group
-#     if owned.EntitlementsByTypes and isinstance(owned.EntitlementsByTypes[0], _EntitlementsByType):
-#         first_group = owned.EntitlementsByTypes[0]
-#         if first_group.Entitlements and isinstance(first_group.Entitlements[0], _EntitlementItem):
-#             pp("First EntitlementItem", first_group.Entitlements[0])
-
