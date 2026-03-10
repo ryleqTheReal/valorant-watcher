@@ -10,3 +10,4 @@ menus*.json
 ingame*.json
 pregame*.json
 *.md
+*test.py
