@@ -649,6 +649,85 @@ class AccountXPResponse:
         if self.History and isinstance(self.History[0], dict):
             self.History = [_XPHistoryEntry(**h) for h in self.History]  # pyright: ignore[reportCallIssue]
 
+@dataclass
+class _LatestCompetitiveUpdate:
+    """Most recent competitive match update."""
+    MatchID: str | None = None                              # Match UUID
+    MapID: str | None = None                                # Map path: "/Game/Maps/Juliett/Juliett"
+    SeasonID: str | None = None                             # Season UUID (act)
+    MatchStartTime: int | None = None                       # Match start time (Unix ms)
+    MatchLength: int | None = None                          # Match duration (ms)
+    TierAfterUpdate: int | None = None                      # Competitive tier after the match
+    TierBeforeUpdate: int | None = None                     # Competitive tier before the match
+    RankedRatingAfterUpdate: int | None = None              # RR after the match
+    RankedRatingBeforeUpdate: int | None = None             # RR before the match
+    RankedRatingEarned: int | None = None                   # Net RR gained/lost
+    RankedRatingPerformanceBonus: int | None = None         # Bonus RR from performance
+    RankedRatingRefundApplied: int | None = None            # RR refunded (e.g. AFK teammate)
+    NewMapIncentiveRRForgiven: int | None = None            # RR forgiven for new map incentive
+    CompetitiveMovement: str | None = None                  # "MOVEMENT_UNKNOWN", "PROMOTED", "DEMOTED", etc.
+    AFKPenalty: int | None = None                           # RR penalty for AFK
+    WasDerankProtected: bool | None = None                  # Whether derank protection triggered
+    WasDerankProtectionReplenished: bool | None = None      # Whether derank protection was restored
+
+@dataclass
+class _SeasonalInfo:
+    """Per-season competitive stats for a queue."""
+    SeasonID: str | None = None                             # Season UUID (act)
+    NumberOfWins: int | None = None                         # Wins (excluding placements)
+    NumberOfWinsWithPlacements: int | None = None           # Wins including placement matches
+    NumberOfGames: int | None = None                        # Total games played
+    Rank: int | None = None                                 # Peak rank achieved
+    CapstoneWins: int | None = None                         # Capstone (promotion) wins
+    LeaderboardRank: int | None = None                      # Leaderboard position (0 = unranked)
+    CompetitiveTier: int | None = None                      # Current competitive tier
+    RankedRating: int | None = None                         # Current RR within tier
+    WinsByTier: dict[str, int] | None = None                # Wins per tier: {"21": 3, "22": 5}
+    GamesNeededForRating: int | None = None                 # Placement games remaining
+    TotalWinsNeededForRank: int | None = None               # Wins needed before ranked rating shows
+
+@dataclass
+class _QueueSkillData:
+    """Skill/ranking data for a single queue (competitive, deathmatch, etc.)."""
+    TotalGamesNeededForRating: int | None = None                                                    # Total placement games required
+    TotalGamesNeededForLeaderboard: int | None = None                                               # Games needed for leaderboard eligibility
+    CurrentSeasonGamesNeededForRating: int | None = None                                            # Placement games remaining this season
+    SeasonalInfoBySeasonID: dict[str, _SeasonalInfo] | dict[str, dict[str, object]] | None = None   # Per-season stats keyed by season UUID
+
+    def __post_init__(self) -> None:
+        if self.SeasonalInfoBySeasonID:
+            first_val = next(iter(self.SeasonalInfoBySeasonID.values()))
+            if isinstance(first_val, dict):
+                self.SeasonalInfoBySeasonID = {
+                    k: _SeasonalInfo(**v) for k, v in self.SeasonalInfoBySeasonID.items()  # pyright: ignore[reportCallIssue]
+                }
+
+@dataclass
+class PlayerMMRResponse:
+    """Response from GET /mmr/v1/players/{puuid}"""
+    Version: int | None = None                                                                      # Schema version
+    Subject: str | None = None                                                                      # Player UUID (PUUID)
+    LatestCompetitiveUpdate: _LatestCompetitiveUpdate | dict[str, object] | None = None             # Most recent ranked match result
+    NewPlayerExperienceFinished: bool | None = None                                                 # Whether new player onboarding is done
+    IsActRankBadgeHidden: bool | None = None                                                        # Whether act rank badge is hidden
+    IsLeaderboardAnonymized: bool | None = None                                                     # Whether leaderboard name is hidden
+    OnboardingFlowV2Enabled: bool | None = None                                                     # V2 onboarding flow flag
+    OnboardingStatus: str | None = None                                                             # "OnboardingComplete", etc.
+    IsAtDerankProtectedTier: bool | None = None                                                     # Whether at derank-protected tier
+    DerankProtectedGamesRemaining: int | None = None                                                # Derank protection games left
+    DerankProtectedStatus: str | None = None                                                        # "Empty", "Active", etc.
+    QueueSkills: dict[str, _QueueSkillData] | dict[str, dict[str, object]] | None = None            # Per-queue skill data keyed by queue ID
+
+    def __post_init__(self) -> None:
+        if isinstance(self.LatestCompetitiveUpdate, dict):
+            self.LatestCompetitiveUpdate = _LatestCompetitiveUpdate(**self.LatestCompetitiveUpdate)  # pyright: ignore[reportArgumentType]
+        if self.QueueSkills:
+            first_val = next(iter(self.QueueSkills.values()))
+            if isinstance(first_val, dict):
+                self.QueueSkills = {
+                    k: _QueueSkillData(**v) for k, v in self.QueueSkills.items()  # pyright: ignore[reportCallIssue]
+                }
+
 # ------------ Game State Models ------------
 
 
