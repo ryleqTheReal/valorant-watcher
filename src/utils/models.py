@@ -536,6 +536,61 @@ class ItemTypes(Enum):
     SKINS = "e7c63390-eda7-46e0-bb7a-a6abdacd2433"
     SKIN_VARIANTS = "3ad1b2b2-acdb-4524-852f-954a76ddae0a"
     TITLES = "de7caa6b-adf7-4588-bbd1-143831e786c6"
+    
+@dataclass
+class _XPProgress:
+    """Level and XP progress snapshot."""
+    Level: int | None = None              # Account level
+    XP: int | None = None                 # XP within the current level
+
+@dataclass
+class _XPSource:
+    """A single XP source entry (e.g. time-played, match-win)."""
+    ID: str | None = None                 # Source type: "time-played", "match-win", "first-win-of-the-day"
+    Amount: int | None = None             # XP awarded from this source
+
+@dataclass
+class _XPMultiplier:
+    """A single XP multiplier entry."""
+    ID: str | None = None                 # Multiplier type: e.g. "penalty-modifier"
+    Value: float | None = None            # Multiplier value (0 = no XP granted)
+
+@dataclass
+class _XPHistoryEntry:
+    """A single match XP history entry."""
+    ID: str | None = None                                                       # Match UUID
+    MatchStart: str | None = None                                               # ISO 8601 match start time
+    StartProgress: _XPProgress | dict[str, object] | None = None                # Level/XP before the match
+    EndProgress: _XPProgress | dict[str, object] | None = None                  # Level/XP after the match
+    XPDelta: int | None = None                                                  # Total XP gained from the match
+    XPSources: list[_XPSource] | list[dict[str, object]] | None = None          # Breakdown of XP sources
+    XPMultipliers: list[_XPMultiplier] | list[dict[str, object]] | None = None  # Active XP multipliers
+
+    def __post_init__(self) -> None:
+        if isinstance(self.StartProgress, dict):
+            self.StartProgress = _XPProgress(**self.StartProgress)  # pyright: ignore[reportArgumentType]
+        if isinstance(self.EndProgress, dict):
+            self.EndProgress = _XPProgress(**self.EndProgress)  # pyright: ignore[reportArgumentType]
+        if self.XPSources and isinstance(self.XPSources[0], dict):
+            self.XPSources = [_XPSource(**s) for s in self.XPSources]  # pyright: ignore[reportCallIssue]
+        if self.XPMultipliers and isinstance(self.XPMultipliers[0], dict):
+            self.XPMultipliers = [_XPMultiplier(**m) for m in self.XPMultipliers]  # pyright: ignore[reportCallIssue]
+
+@dataclass
+class AccountXPResponse:
+    """Response from GET /account-xp/v1/players/{puuid}"""
+    Version: int | None = None                                                      # Schema version
+    Subject: str | None = None                                                       # Player UUID (PUUID)
+    Progress: _XPProgress | dict[str, object] | None = None                          # Current level/XP progress
+    History: list[_XPHistoryEntry] | list[dict[str, object]] | None = None            # Recent match XP history
+    LastTimeGrantedFirstWin: str | None = None                                       # ISO 8601 last first-win-of-the-day grant
+    NextTimeFirstWinAvailable: str | None = None                                     # ISO 8601 next first-win-of-the-day availability
+
+    def __post_init__(self) -> None:
+        if isinstance(self.Progress, dict):
+            self.Progress = _XPProgress(**self.Progress)  # pyright: ignore[reportArgumentType]
+        if self.History and isinstance(self.History[0], dict):
+            self.History = [_XPHistoryEntry(**h) for h in self.History]  # pyright: ignore[reportCallIssue]
 
 # ------------ Game State Models ------------
 
