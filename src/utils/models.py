@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
 from enum import Enum
@@ -730,6 +730,69 @@ class PlayerMMRResponse:
                 self.QueueSkills = {
                     k: _QueueSkillData(**v) for k, v in self.QueueSkills.items()  # pyright: ignore[reportCallIssue]
                 }
+                
+                
+# ------------ Match Collection Models ------------
+
+@dataclass
+class MatchHistoryEntry:
+    """A single entry from the match history endpoint."""
+    MatchID: str = ""
+    GameStartTime: int = 0          # Unix milliseconds
+    QueueID: str | None = None
+
+
+@dataclass
+class MatchHistoryResponse:
+    """Response from GET /match-history/v1/history/{puuid}."""
+    Subject: str = ""
+    BeginIndex: int = 0
+    EndIndex: int = 0
+    Total: int = 0
+    History: list[MatchHistoryEntry] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.History and isinstance(self.History[0], dict):
+            self.History = [MatchHistoryEntry(**h) for h in self.History]  # pyright: ignore[reportCallIssue]
+
+
+@dataclass
+class AccountProgress:
+    """Per-account match collection progress.
+
+    Tracks two boundaries that define a "known window":
+    - newest_known_time: most recent match timestamp we've ever seen
+    - oldest_fetched_time: oldest match timestamp we've ever fetched
+
+    Everything between these two times has already been fetched. Fresh matches
+    are newer than newest_known_time; legacy matches are older than
+    oldest_fetched_time.
+    """
+    newest_known_time: int = 0
+    oldest_fetched_time: int = 0
+    legacy_complete: bool = False
+
+
+@dataclass
+class MatchWatermark:
+    """Central cross-session state for match collection.
+
+    Account progress (fresh/legacy boundaries) is per-PUUID since each
+    account has its own match history.  Everything else is shared across
+    all accounts to avoid redundant API calls:
+
+    - fetched_matches: match IDs whose details have already been fetched
+      by *any* account in *any* phase — prevents duplicate detail requests.
+    - dig_visited: player PUUIDs whose match history has been explored
+      during the DFS dig phase — never re-dug.
+
+    The unvisited player pool (dig_queue in the JSON file) is managed as
+    an in-memory set by MatchCollector, not stored in this dataclass.
+    """
+    accounts: dict[str, AccountProgress] = field(default_factory=dict)
+    fetched_matches: set[str] = field(default_factory=set)
+    dig_visited: set[str] = field(default_factory=set)
+
 
 # ------------ Game State Models ------------
 
