@@ -24,9 +24,29 @@ from jwt import decode as jwt_decode, DecodeError  # pyright: ignore[reportUnkno
 from requests import Response
 
 from services.event_bus import EventBus, Event
-from utils.models import AccessTokenJWT, AccountXPResponse, EntitlementsTokenResponse, LockfileData, EndpointURI, OwnedItemsResponse, PenaltiesResponse, PlayerLoadoutResponse, PlayerMMRResponse, RegionInfo, ValorantApiResponse, VersionData
+from utils.models import (
+    AccessTokenJWT, 
+    AccountXPResponse, 
+    EntitlementsTokenResponse, 
+    LockfileData, 
+    EndpointURI, 
+    MatchHistoryResponse, 
+    OwnedItemsResponse, 
+    PenaltiesResponse, 
+    PlayerLoadoutResponse, 
+    PlayerMMRResponse, 
+    RegionInfo, 
+    ValorantApiResponse, 
+    VersionData
+    )
+
 from utils.file_utils import get_recent_log_path
-from utils.exceptions import RegionNotFoundError, FallbackApiError, VersionNotFoundError
+from utils.exceptions import (
+    IncorrectPaginationError, 
+    RegionNotFoundError, 
+    FallbackApiError, 
+    VersionNotFoundError
+    )
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -457,7 +477,41 @@ class RiotSession:
         """Fetch the player's current MMR history"""
         response = await self.fetch("GET", "pd", EndpointURI(f"/mmr/v1/players/{self.puuid}"))
         return PlayerMMRResponse(**response.json())  # pyright: ignore[reportAny]
-    
+
+    async def general_get_history(self, puuid: str, start_index: int, end_index: int) -> MatchHistoryResponse:
+        """Fetch a page of match history for any player
+           Note: The maximum total amount per page is 20
+
+        Args:
+            puuid: Target player's UUID (can be self or another player)
+            start_index: Inclusive start index (0 = most recent match)
+            end_index: Exclusive end index
+        """
+        
+        total: int = end_index - start_index
+        if total <= 0:
+            raise IncorrectPaginationError(f"The page range may not be negative, received {total}")
+        
+        if total > 20:
+            raise IncorrectPaginationError(f"The total results per page may not exceed 20, received {total}")
+        
+        response = await self.fetch(
+            "GET", "pd",
+            EndpointURI(f"/match-history/v1/history/{puuid}"),
+            params={"startIndex": str(start_index), "endIndex": str(end_index)},
+        )
+        return MatchHistoryResponse(**response.json())  # pyright: ignore[reportAny]
+
+    async def general_get_details(self, match_id: str) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
+        """Fetch full match details. Returns raw dict (structure too complex to fully type)."""
+        response = await self.fetch("GET", "pd", EndpointURI(f"/match-details/v1/matches/{match_id}"))
+        return response.json()   # pyright: ignore[reportAny]
+
+    @property
+    def is_rate_limited(self) -> bool:
+        """Whether a rate-limit cooldown is currently active"""
+        return self._cooldown_until > time.monotonic()
+
 class AuthHandler:
     """
     Manages the auth lifecycle based on event bus events.
