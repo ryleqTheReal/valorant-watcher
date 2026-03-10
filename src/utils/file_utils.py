@@ -70,3 +70,10 @@ def get_config_path() -> Path:
         logger.error("The config file does not exist, cannot launch properly.")
         raise PathResolutionError("The config file does not exist, cannot launch properly.")
     return config_path
+
+
+@cache
+def get_watermark_path() -> Path:
+    """Return the path to the local match watermark file.
+       Stored next to config.json in the project root: data/match_watermarks.json"""
+    return Path(__file__).resolve().parents[2] / "data" / "match_watermarks.json"
