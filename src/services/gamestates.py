@@ -13,8 +13,11 @@ import logging
 from typing import Any, Callable
 from collections.abc import Awaitable
 
+from pathlib import Path
+
 from services.auth_service import RiotSession
 from services.event_bus import EventBus, Event
+from services.match_collector import MatchCollector
 from services.request_scheduler import RequestScheduler
 from utils.models import (
     GameStateTransition,
@@ -46,11 +49,13 @@ class GamestateHandler:
     def __init__(
         self,
         bus: EventBus,
+        watermark_path: Path,
         ratelimit_offset: int = 60,
         initial_limit: int = 6,
         sustained_limit: int = 20,
     ) -> None:
         self.bus: EventBus = bus
+        self._watermark_path: Path = watermark_path
         self._ratelimit_offset: int = ratelimit_offset
         self._session: RiotSession | None = None
         self._current_state: SessionLoopState | None = None
@@ -59,6 +64,7 @@ class GamestateHandler:
             initial_limit=initial_limit,
             sustained_limit=sustained_limit,
         )
+        self._match_collector: MatchCollector | None = None
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
@@ -80,9 +86,15 @@ class GamestateHandler:
     # ------------------- Event Handlers -------------------
 
     async def _on_auth_success(self, data: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
-        """Store the authenticated session for API access."""
+        """Store the authenticated session and initialize match collection."""
         self._session = data["session"]
         self._scheduler.start()
+        self._match_collector = MatchCollector(
+            session=self._session,  # pyright: ignore[reportArgumentType]
+            bus=self.bus,
+            scheduler=self._scheduler,
+            watermark_path=self._watermark_path,
+        )
         logger.info(f"Gamestate tracker ready for puuid {self._puuid}")
 
     async def _on_websocket_event(self, data: PresenceWebsocketEvent) -> None:
@@ -246,12 +258,24 @@ class GamestateHandler:
         logger.info("Rate limit cooldown finished, collecting data")
 
     def _enqueue_general_checks(self) -> None:
-        """Enqueue all general-purpose data checks (low priority)."""
+        """Enqueue all general-purpose data checks (low priority).
+
+        Also starts the match collector if it hasn't been started yet.
+        Match collection requests are enqueued after the general checks,
+        so player data is always fetched first.
+        """
         self._scheduler.enqueue_general(self._check_owned, "owned items")
         self._scheduler.enqueue_general(self._check_loadout, "loadout")
         self._scheduler.enqueue_general(self._check_xp, "xp")
         self._scheduler.enqueue_general(self._check_penalties, "penalties")
         self._scheduler.enqueue_general(self._check_mmr, "mmr")
+
+        # Start match collection after general checks are queued.
+        # The collector self-schedules: each completed request enqueues
+        # the next one into the general queue, naturally interleaving
+        # with other general requests.
+        if self._match_collector:
+            self._match_collector.start()
 
     # ------------------- Helpers -------------------
 
@@ -291,6 +315,9 @@ class GamestateHandler:
 
     def _reset(self) -> None:
         """Clear all tracking state."""
+        if self._match_collector:
+            self._match_collector.stop()
+            self._match_collector = None
         self._scheduler.stop()
         self._cancel_pending_task()
         if self._current_state is not None:
