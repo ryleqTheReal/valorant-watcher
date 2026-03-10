@@ -33,6 +33,7 @@ class Event(Enum):
     SHUTDOWN = "SHUTDOWN"                       # App is shutting down
     LOADOUT_UPDATED = "LOADOUT_UPDATED"         # User has updated their own equipped loadout
     OWNED_ITEMS_UPDATED = "OWNED_ITEMS_UPDATED" # User has acquired or lost items
+    USER_XP_UPDATED = "USER_XP_UPDATED"         # The user's XP has been updated
 
 IGNORE_EVENTS = ["AUTH_SUCCESS", "WEBSOCKET_EVENT", "LOADOUT_UPDATED", "OWNED_ITEMS_UPDATED"]
 
