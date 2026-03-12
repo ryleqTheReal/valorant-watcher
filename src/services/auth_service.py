@@ -36,6 +36,7 @@ from utils.models import (
     PenaltiesResponse,
     PlayerLoadoutResponse,
     PlayerMMRResponse,
+    IngameMatchResponse,
     PregameMatchResponse,
     PresenceResponse,
     RegionInfo,
@@ -642,6 +643,28 @@ class RiotSession:
         known = {f.name for f in fields(PregameMatchResponse)}
         return PregameMatchResponse(**{k: v for k, v in data.items() if k in known})  # pyright: ignore [reportAny]
 
+    # -------------- Ingame Endpoints --------------
+
+    async def ingame_get_player(self) -> str:
+        """Fetch the current ingame match ID for the authenticated player.
+
+        Returns:
+            The ingame match ID string.
+        """
+        response = await self.fetch("GET", "glz", EndpointURI(f"/core-game/v1/players/{self.puuid}"))
+        data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
+        return data.get("MatchID", "")  # pyright: ignore[reportAny]
+
+    async def ingame_get_match(self, match_id: str) -> IngameMatchResponse:
+        """Fetch full ingame match data (active match).
+
+        Args:
+            match_id: The ingame match UUID from ingame_get_player.
+        """
+        response = await self.fetch("GET", "glz", EndpointURI(f"/core-game/v1/matches/{match_id}"))
+        data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
+        known = {f.name for f in fields(IngameMatchResponse)}
+        return IngameMatchResponse(**{k: v for k, v in data.items() if k in known})  # pyright: ignore[reportAny]
 
     @property
     def is_rate_limited(self) -> bool:
