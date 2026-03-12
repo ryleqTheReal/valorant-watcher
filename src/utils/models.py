@@ -802,9 +802,11 @@ class LeaderboardResponse:
 
     def __post_init__(self) -> None:
         if self.Players and isinstance(self.Players[0], dict):
-            self.Players = [LeaderboardPlayer(**p) for p in self.Players]  # pyright: ignore[reportCallIssue]
+            known_player = {f.name for f in fields(LeaderboardPlayer)}
+            self.Players = [LeaderboardPlayer(**{k: v for k, v in p.items() if k in known_player}) for p in self.Players]    # pyright: ignore[reportArgumentType, reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
         if self.tierDetails and isinstance(next(iter(self.tierDetails.values())), dict):
-            self.tierDetails = {k: TierDetail(**v) for k, v in self.tierDetails.items()}  # pyright: ignore[reportCallIssue]
+            known_tier = {f.name for f in fields(TierDetail)}
+            self.tierDetails = {k: TierDetail(**{tk: tv for tk, tv in v.items() if tk in known_tier}) for k, v in self.tierDetails.items()}  # pyright: ignore[reportArgumentType, reportUnknownVariableType, reportUnknownMemberType, reportAttributeAccessIssue]
 
 
 @dataclass
