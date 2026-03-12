@@ -78,6 +78,15 @@ class ValorantStatsApp:
         _ = self.bus.on(Event.MATCH_DETAIL_FETCHED, _on_match_detail, priority=0)
         # --- END TEMP ---
 
+        # --- TEMP: log pregame version changes ---
+        async def _on_pregame_update(data: object) -> None:
+            from utils.models import PregameMatchResponse
+            if isinstance(data, PregameMatchResponse):
+                logger.info(f"[PREGAME] Version changed: {data.Version} | State: {data.PregameState} | Map: {data.MapID}")
+
+        _ = self.bus.on(Event.PREGAME_MATCH_UPDATED, _on_pregame_update, priority=0)
+        # --- END TEMP ---
+
         logger.info("=" * 60)
         logger.info("  Valorant Stats Collector started")
         logger.info(f"  Match dump: {match_dump_path}")

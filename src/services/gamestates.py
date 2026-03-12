@@ -70,6 +70,7 @@ class GamestateHandler:
             aggressive_limit=aggressive_limit,
         )
         self._match_collector: MatchCollector | None = None
+        self._valorant_open: bool = False
         self._presence_poll_task: asyncio.Task[None] | None = None
         self._pregame_poll_task: asyncio.Task[None] | None = None
         self._loadout_version: int | None = None
@@ -103,7 +104,7 @@ class GamestateHandler:
         scheduler is paused for 60s to let other apps do their thing
         """
         self._session = data["session"]
-        self._scheduler.start(aggressive=True)
+        self._scheduler.start(aggressive=not self._valorant_open)
         self._match_collector = MatchCollector(
             session=self._session,  # pyright: ignore[reportArgumentType]
             bus=self.bus,
@@ -121,6 +122,7 @@ class GamestateHandler:
         limit budget.  After the cooldown, polls /chat/v4/presences to
         get the baseline sessionLoopState.
         """
+        self._valorant_open = True
         if self._session is None or self._current_state is not None:
             return
 
@@ -223,6 +225,7 @@ class GamestateHandler:
 
     async def _on_valorant_close(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
         """Valorant closed -> reset tracking state."""
+        self._valorant_open = False
         self._reset()
 
     async def _on_rso_logout(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
