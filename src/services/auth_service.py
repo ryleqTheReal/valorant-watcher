@@ -337,7 +337,7 @@ class RiotSession:
         self.client.headers.update(self.headers)
 
         # Fetch the current competitive season immediately so it's available for the entire session
-        self.season_id = await self._fetch_current_season()
+        self.season_id = await self.shared_get_season()
         logger.info(f"Authentication complete. PUUID: {self.puuid}, Season: {self.season_id}")
 
         # Start background token refresh
@@ -493,8 +493,9 @@ class RiotSession:
     
     # I have come up with the following naming scheme:
     # general_* => The endpoint is available after user logs in aka RSO_LOGIN event
+    # shared_*  => The endpoint hits a shared/global service (e.g. content-service) available after login
     # local_*   => The endpoint is available after VALORANT is officially loaded => VALORANT_OPENED + polling until success
-    # state_*   => The endpoint is available when its sessionLoopState is reached => PREGAME, INGAME 
+    # state_*   => The endpoint is available when its sessionLoopState is reached => PREGAME, INGAME
 
     async def general_get_loadout(self) -> PlayerLoadoutResponse:
         """Fetch the player's current loadout (skins, sprays, identity)."""
@@ -576,12 +577,12 @@ class RiotSession:
 
         response = await self.fetch(
             "GET", "pd",
-            EndpointURI(f"/mmr/v1/leaderboards/affinity/{self.region.pd_shard}/queue/competitive/season/{self.season_id or await self._fetch_current_season()}"),
+            EndpointURI(f"/mmr/v1/leaderboards/affinity/{self.region.pd_shard}/queue/competitive/season/{self.season_id or await self.shared_get_season()}"),
             params=params,
         )
         return LeaderboardResponse(**response.json())  # pyright: ignore[reportAny]
 
-    async def _fetch_current_season(self) -> str:
+    async def shared_get_season(self) -> str:
         """Fetch the content service and extract the current competitive season ID.
 
         Called once during authentication so the season is available for the entire session.
