@@ -45,8 +45,8 @@ from typing import Any
 from services.auth_service import RiotSession
 from services.event_bus import EventBus, Event
 from services.request_scheduler import RequestScheduler
-from utils.exceptions import IncorrectPaginationError
-from utils.models import AccountProgress, MatchHistoryEntry, MatchHistoryResponse, MatchWatermark
+from utils.exceptions import IncorrectPaginationError, LeaderboardFallbackError
+from utils.models import AccountProgress, LeaderboardResponse, MatchHistoryEntry, MatchHistoryResponse, MatchWatermark
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -207,6 +207,21 @@ class MatchCollector:
             # Don't retry the same page and treat as end of history
             self._phase = "legacy"
             self._enqueue_next()
+            return
+        
+        if response.Total == 0:
+            logger.info("Account has no match history, falling back to leaderboard to seed dig phase")
+            try:
+                match_ids = await self._fallback_leaderboard()
+                for mid in match_ids:
+                    self._watermark.fetched_matches.add(mid)
+                    self._detail_queue.append(mid)
+            except LeaderboardFallbackError as e:
+                logger.warning(f"Leaderboard fallback failed: {e.message}")
+
+            self._account.legacy_complete = True
+            self._save_watermark()
+            self._transition_to_dig()
             return
 
         logger.debug(f"Fresh: response Total={response.Total}, BeginIndex={response.BeginIndex}, EndIndex={response.EndIndex}, History length={len(response.History or [])}")
@@ -636,3 +651,50 @@ class MatchCollector:
             )
         except OSError as e:
             logger.warning(f"Failed to save watermark: {e}")
+            
+    async def _fallback_leaderboard(self) -> list[str]:
+        """Seed the dig phase from top-500 leaderboard players when the account has no match history.
+
+        Picks a random player from the leaderboard, fetches their match history,
+        and returns the match IDs. If that player has no history, tries the next
+        random player until one works or all 500 are exhausted.
+
+        Returns:
+            List of match IDs from the first leaderboard player with history.
+
+        Raises:
+            RuntimeError: If no leaderboard player yields any match history.
+        """
+        leaderboard: LeaderboardResponse = await self._session.general_get_leaderboard(start_index=0, size=510)
+        players = [p for p in (leaderboard.Players or []) if hasattr(p, "puuid") and p.puuid]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+
+        if not players:
+            raise LeaderboardFallbackError(message="Leaderboard returned no players")
+
+        random.shuffle(players)
+
+        for player in players:
+            puuid: str = player.puuid  # pyright: ignore[reportUnknownMemberType, reportAssignmentType, reportUnknownVariableType, reportAttributeAccessIssue]
+            logger.debug(f"Fallback: trying leaderboard player {puuid[:8]}")
+
+            try:
+                response: MatchHistoryResponse = await self._session.general_get_history(
+                    puuid=puuid,
+                    start_index=0,
+                    end_index=PAGE_SIZE,
+                )
+            except Exception as e:
+                logger.debug(f"Fallback: failed to fetch history for {puuid[:8]}: {e}")
+                continue
+
+            history: list[MatchHistoryEntry] = [
+                e for e in (response.History or []) if isinstance(e, MatchHistoryEntry)
+            ]
+
+            if history:
+                match_ids: list[str] = [e.MatchID for e in history]
+                logger.info(f"Fallback: found {len(match_ids)} match(es) from leaderboard player {puuid[:8]}")
+                return match_ids
+
+        raise LeaderboardFallbackError(message="No leaderboard player had accessible match history")
+
