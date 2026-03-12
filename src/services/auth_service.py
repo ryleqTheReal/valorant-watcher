@@ -532,12 +532,22 @@ class RiotSession:
         
         if total > 20:
             raise IncorrectPaginationError(f"The total results per page may not exceed 20, received {total}")
+        try:
+            response = await self.fetch(
+                "GET", "pd",
+                EndpointURI(f"/match-history/v1/history/{puuid}"),
+                params={"startIndex": str(start_index), "endIndex": str(end_index)},
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 400:
+                try:
+                    body = e.response.json()  # pyright: ignore[reportAny]
+                except (ValueError, httpx.DecodingError):
+                    raise  # re-raise the original HTTPStatusError
+                if body.get("errorCode") == "MATCH_HISTORY_INVALID_INDICES":  # pyright: ignore[reportAny]
+                    raise IncorrectPaginationError("The requested pages do not exist and are out of bounds") from e
+            raise
         
-        response = await self.fetch(
-            "GET", "pd",
-            EndpointURI(f"/match-history/v1/history/{puuid}"),
-            params={"startIndex": str(start_index), "endIndex": str(end_index)},
-        )
         return MatchHistoryResponse(**response.json())  # pyright: ignore[reportAny]
 
     async def general_get_details(self, match_id: str) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
