@@ -28,42 +28,86 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
-    """Per-minute request rate limiter with two-phase limits.
+    """Per-minute request rate limiter with three modes
 
-    After a gamestate change (reset) the first window uses ``initial_limit``
-    (6 req in first minute) because other apps have likely consumed the bulk of the
-    30 req/min budget, the following windows use ``sustained_limit``
-    (20 req/min) to leave headroom for other apps
+    Modes (set via ``set_mode``):
+    - aggressive: No other apps competing pre-game login, AFK in lobby for extended period
+      Uses the full safe budget 24 requests per min by default
+    - sustained: Normal operation while VALORANT is open which leaves
+      headroom for other apps 20 requests per min
+    - initial: First window after a gamestate change, other apps
+      are likely bursting and are close to having reached or have reached the rate limit
+      so we know that after a ratelimit the next minute allows for 6 requests per minute which
+      we use here
+      
+      then automatically slides to sustained
 
     Call :meth:`wait_for_slot` before every outgoing request. It will
-    ``asyncio.sleep`` until the current window has enough budget
+    ``asyncio.sleep`` until the current window has enough budget.
     """
 
     def __init__(
         self,
         initial_limit: int = 6,
         sustained_limit: int = 20,
+        aggressive_limit: int = 24,
         window_seconds: float = 60.0,
     ) -> None:
         self._initial_limit: int = initial_limit
         self._sustained_limit: int = sustained_limit
+        self._aggressive_limit: int = aggressive_limit
         self._window_seconds: float = window_seconds
 
         self._current_limit: int = initial_limit
         self._request_count: int = 0
         self._window_start: float = 0.0
         self._is_first_window: bool = True
+        self._mode: str = "sustained"  # aggressive | sustained | initial
 
     # ---- public ----
 
-    def reset(self) -> None:
-        """Resets the counter and ratelimit timer when gamestate changes"""
-        
+    def set_mode(self, mode: str) -> None:
+        """Switch the rate limiter mode
+
+        Args:
+            mode: "aggressive" => no competition 
+                  "sustained" => normal
+                  "initial" => conservative first window after state change
+        """
+        self._mode = mode
         self._request_count = 0
         self._window_start = 0.0
-        self._is_first_window = True
-        self._current_limit = self._initial_limit
-        logger.debug(f"rate limiter reset (next window: {self._initial_limit} req)")
+
+        match mode:
+            case "aggressive":
+                self._is_first_window = False
+                self._current_limit = self._aggressive_limit
+            case "sustained":
+                self._is_first_window = False
+                self._current_limit = self._sustained_limit
+            case "initial":
+                self._is_first_window = True
+                self._current_limit = self._initial_limit
+            case _:
+                pass
+
+        logger.debug(f"rate limiter mode: {mode} ({self._current_limit} req/window)")
+
+    def start_sustained(self) -> None:
+        """Start at full sustained rate, no competing apps yet"""
+        self.set_mode("sustained")
+
+    def start_aggressive(self) -> None:
+        """Start at aggressive rate, no other apps competing at all"""
+        self.set_mode("aggressive")
+
+    def reset(self) -> None:
+        """Resets the counter and ratelimit timer when gamestate changes.
+
+        Drops to the conservative initial limit for the first window
+        because other apps are likely competing for rate budget.
+        """
+        self.set_mode("initial")
 
     async def wait_for_slot(self) -> None:
         """Block until one request slot is available then consume it"""
@@ -104,14 +148,18 @@ class RateLimiter:
             self._slide_window()
 
     def _slide_window(self) -> None:
-        """Slides the window to the next time-frame"""
-        
+        """Slides the window to the next time-frame
+
+        After the initial (conservative) window slides to sustained
+        since other apps have finished their burst by then
+        """
         if self._is_first_window:
             self._is_first_window = False
             self._current_limit = self._sustained_limit
+            self._mode = "sustained"
         self._window_start = time.monotonic()
         self._request_count = 0
-        logger.debug(f"new rate-limit window started (ends: {self._current_limit})")
+        logger.debug(f"new rate-limit window started ({self._mode}: {self._current_limit} req)")
 
 
 @dataclass(slots=True)
@@ -137,6 +185,7 @@ class RequestScheduler:
         self,
         initial_limit: int = 6,
         sustained_limit: int = 20,
+        aggressive_limit: int = 24,
     ) -> None:
         self._state_queue: deque[QueuedRequest] = deque()
         self._general_queue: deque[QueuedRequest] = deque()
@@ -159,6 +208,7 @@ class RequestScheduler:
         self._rate_limiter: RateLimiter = RateLimiter(
             initial_limit=initial_limit,
             sustained_limit=sustained_limit,
+            aggressive_limit=aggressive_limit,
         )
 
     # ------------------- Public API -------------------
@@ -171,11 +221,21 @@ class RequestScheduler:
     def general_queue_size(self) -> int:
         return len(self._general_queue)
 
-    def start(self) -> None:
-        """Start the worker loop.  No-op if already running."""
+    def start(self, aggressive: bool = False) -> None:
+        """Start the worker loop, no-op if already running
+
+        Args:
+            aggressive: If True, start at the aggressive rate (no other
+                        apps competing), otherwise use sustained rate
+        """
         if self._running:
             return
         self._running = True
+        self._active.set()
+        if aggressive:
+            self._rate_limiter.start_aggressive()
+        else:
+            self._rate_limiter.start_sustained()
         self._worker_task = asyncio.create_task(self._worker())
         logger.info("Request scheduler started")
 
@@ -190,6 +250,10 @@ class RequestScheduler:
         self._state_queue.clear()
         self._general_queue.clear()
         logger.info("Request scheduler stopped")
+
+    def set_rate_mode(self, mode: str) -> None:
+        """Switch the rate limiter mode: 'aggressive', 'sustained', or 'initial'."""
+        self._rate_limiter.set_mode(mode)
 
     def pause(self) -> None:
         """Pause request processing (e.g. during ratelimit offset)."""
