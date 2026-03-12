@@ -36,6 +36,7 @@ from utils.models import (
     PenaltiesResponse,
     PlayerLoadoutResponse,
     PlayerMMRResponse,
+    PregameMatchResponse,
     PresenceResponse,
     RegionInfo,
     ValorantApiResponse,
@@ -492,10 +493,11 @@ class RiotSession:
     # ------------------- API Wrappers -------------------
     
     # I have come up with the following naming scheme:
-    # general_* => The endpoint is available after user logs in aka RSO_LOGIN event
-    # shared_*  => The endpoint hits a shared/global service (e.g. content-service) available after login
-    # local_*   => The endpoint is available after VALORANT is officially loaded => VALORANT_OPENED + polling until success
-    # state_*   => The endpoint is available when its sessionLoopState is reached => PREGAME, INGAME
+    # general_*  => The endpoint is available after user logs in aka RSO_LOGIN event
+    # shared_*   => The endpoint hits a shared/global service (e.g. content-service) available after login
+    # local_*    => The endpoint is available after VALORANT is officially loaded => VALORANT_OPENED + polling until success
+    # pregame_*  => The endpoint is available during the PREGAME sessionLoopState (agent select)
+    # ingame_*   => The endpoint is available during the INGAME sessionLoopState (match in progress)
 
     async def general_get_loadout(self) -> PlayerLoadoutResponse:
         """Fetch the player's current loadout (skins, sprays, identity)."""
@@ -581,6 +583,8 @@ class RiotSession:
             params=params,
         )
         return LeaderboardResponse(**response.json())  # pyright: ignore[reportAny]
+    
+    # -------------- Shared Endpoints --------------
 
     async def shared_get_season(self) -> str:
         """Fetch the content service and extract the current competitive season ID.
@@ -608,13 +612,36 @@ class RiotSession:
             logger.warning(f"Failed to fetch current season: {type(e).__name__}: {e}")
         return ""
 
-    # ------- Local --------
+    # -------------- Local Endpoints --------------
     
     async def local_get_presences(self) -> PresenceResponse:
         """Fetch all known presences"""
         response = await self.fetch("GET", "local", EndpointURI("/chat/v4/presences"))
         return PresenceResponse(**response.json())  # pyright: ignore[reportAny]
     
+    # -------------- Pregame Endpoints --------------
+
+    async def pregame_get_player(self) -> str:
+        """Fetch the current pregame match ID for the authenticated player.
+
+        Returns:
+            The pregame match ID string.
+        """
+        response = await self.fetch("GET", "glz", EndpointURI(f"/pregame/v1/players/{self.puuid}"))
+        data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
+        return data.get("MatchID", "")  # pyright: ignore[reportAny]
+
+    async def pregame_get_match(self, match_id: str) -> PregameMatchResponse:
+        """Fetch full pregame match data (agent select lobby).
+
+        Args:
+            match_id: The pregame match UUID from pregame_get_player.
+        """
+        response = await self.fetch("GET", "glz", EndpointURI(f"/pregame/v1/matches/{match_id}"))
+        data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
+        known = {f.name for f in fields(PregameMatchResponse)}
+        return PregameMatchResponse(**{k: v for k, v in data.items() if k in known})  # pyright: ignore [reportAny]
+
 
     @property
     def is_rate_limited(self) -> bool:
