@@ -40,6 +40,7 @@ class Event(Enum):
     MMR_HISTORY_UPDATED = "MMR_HISTORY_UPDATED" # The player's MMR history has updated
     MATCH_DETAIL_FETCHED = "MATCH_DETAIL_FETCHED" # A match's full details have been fetched
     LEADERBOARD_FETCHED = "LEADERBOARD_FETCHED" # Leaderboard data has been retrieved
+    PREGAME_MATCH_UPDATED = "PREGAME_MATCH_UPDATED" # Pregame match data fetched during agent select
 
 IGNORE_EVENTS = [
     "AUTH_SUCCESS", 
@@ -50,7 +51,8 @@ IGNORE_EVENTS = [
     "PENALTIES_UPDATED",
     "MMR_HISTORY_UPDATED",
     "MATCH_DETAIL_FETCHED",
-    "LEADERBOARD_FETCHED"
+    "LEADERBOARD_FETCHED",
+    "PREGAME_MATCH_UPDATED"
     ]
 
 @dataclass
