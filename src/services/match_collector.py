@@ -666,6 +666,7 @@ class MatchCollector:
             RuntimeError: If no leaderboard player yields any match history.
         """
         leaderboard: LeaderboardResponse = await self._session.general_get_leaderboard(start_index=0, size=510)
+        _ = await self._bus.emit(Event.LEADERBOARD_FETCHED, leaderboard)
         players = [p for p in (leaderboard.Players or []) if hasattr(p, "puuid") and p.puuid]  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
 
         if not players:
