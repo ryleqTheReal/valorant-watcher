@@ -28,6 +28,7 @@ from utils.models import (
     AccessTokenJWT,
     AccountXPResponse,
     EntitlementsTokenResponse,
+    IngameLoadoutsResponse,
     LeaderboardResponse,
     LockfileData,
     EndpointURI,
@@ -665,6 +666,17 @@ class RiotSession:
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
         known = {f.name for f in fields(IngameMatchResponse)}
         return IngameMatchResponse(**{k: v for k, v in data.items() if k in known})  # pyright: ignore[reportAny]
+
+    async def ingame_get_loadouts(self, match_id: str) -> IngameLoadoutsResponse:
+        """Fetch all player loadouts for an active match.
+
+        Args:
+            match_id: The ingame match UUID.
+        """
+        response = await self.fetch("GET", "glz", EndpointURI(f"/core-game/v1/matches/{match_id}/loadouts"))
+        data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
+        known = {f.name for f in fields(IngameLoadoutsResponse)}
+        return IngameLoadoutsResponse(**{k: v for k, v in data.items() if k in known})  # pyright: ignore[reportAny]
 
     @property
     def is_rate_limited(self) -> bool:
