@@ -851,11 +851,11 @@ class MatchWatermark:
     dig_visited_matches: set[str] = field(default_factory=set)
 
 
-# ------------ Pregame Models ------------
+# ------------ Shared GLZ Models (used by both Pregame and Ingame) ------------
 
 
 @dataclass
-class _PregamePlayerIdentity:
+class _GLZPlayerIdentity:
     Subject: str | None = None
     PlayerCardID: str | None = None
     PlayerTitleID: str | None = None
@@ -866,12 +866,15 @@ class _PregamePlayerIdentity:
 
 
 @dataclass
-class _PregameSeasonalBadge:
+class _GLZSeasonalBadge:
     SeasonID: str | None = None
     NumberOfWins: int | None = None
     WinsByTier: dict[str, int] | None = None
     Rank: int | None = None
     LeaderboardRank: int | None = None
+
+
+# ------------ Pregame Models ------------
 
 
 @dataclass
@@ -881,17 +884,17 @@ class _PregamePlayer:
     CharacterSelectionState: str | None = None
     PregamePlayerState: str | None = None
     CompetitiveTier: int | None = None
-    PlayerIdentity: _PregamePlayerIdentity | dict[str, object] | None = None
-    SeasonalBadgeInfo: _PregameSeasonalBadge | dict[str, object] | None = None
+    PlayerIdentity: _GLZPlayerIdentity | dict[str, object] | None = None
+    SeasonalBadgeInfo: _GLZSeasonalBadge | dict[str, object] | None = None
     IsCaptain: bool | None = None
     PlatformType: str | None = None
     PremierPrestige: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.PlayerIdentity, dict):
-            self.PlayerIdentity = _PregamePlayerIdentity(**self.PlayerIdentity)  # pyright: ignore[reportArgumentType]
+            self.PlayerIdentity = _GLZPlayerIdentity(**self.PlayerIdentity)  # pyright: ignore[reportArgumentType]
         if isinstance(self.SeasonalBadgeInfo, dict):
-            self.SeasonalBadgeInfo = _PregameSeasonalBadge(**self.SeasonalBadgeInfo)  # pyright: ignore[reportArgumentType]
+            self.SeasonalBadgeInfo = _GLZSeasonalBadge(**self.SeasonalBadgeInfo)  # pyright: ignore[reportArgumentType]
 
 
 @dataclass
@@ -947,6 +950,86 @@ class PregameMatchResponse:
             self.AllyTeam = _PregameTeam(**self.AllyTeam)  # pyright: ignore[reportArgumentType]
         if isinstance(self.EnemyTeam, dict):
             self.EnemyTeam = _PregameTeam(**self.EnemyTeam)  # pyright: ignore[reportArgumentType]
+
+
+# ------------ Ingame Models ------------
+
+
+@dataclass
+class _IngameConnectionDetails:
+    GameServerHosts: list[str] | None = None
+    GameServerHost: str | None = None
+    GameServerPort: int | None = None
+    GameServerObfuscatedIP: int | None = None
+    GameClientHash: int | None = None
+    PlayerKey: str | None = None
+
+
+@dataclass
+class _IngamePostGamePlayer:
+    Subject: str | None = None
+
+
+@dataclass
+class _IngamePostGameDetails:
+    Start: str | None = None
+    Players: list[_IngamePostGamePlayer] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.Players and isinstance(self.Players[0], dict):
+            known = {f.name for f in fields(_IngamePostGamePlayer)}
+            self.Players = [_IngamePostGamePlayer(**{k: v for k, v in p.items() if k in known}) for p in self.Players]  # pyright: ignore[reportArgumentType, reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+
+
+@dataclass
+class _IngamePlayer:
+    Subject: str | None = None
+    TeamID: str | None = None
+    CharacterID: str | None = None
+    PlayerIdentity: _GLZPlayerIdentity | dict[str, object] | None = None
+    SeasonalBadgeInfo: _GLZSeasonalBadge | dict[str, object] | None = None
+    IsCoach: bool | None = None
+    IsAssociated: bool | None = None
+    PlatformType: str | None = None
+    PremierPrestige: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.PlayerIdentity, dict):
+            self.PlayerIdentity = _GLZPlayerIdentity(**self.PlayerIdentity)  # pyright: ignore[reportArgumentType]
+        if isinstance(self.SeasonalBadgeInfo, dict):
+            self.SeasonalBadgeInfo = _GLZSeasonalBadge(**self.SeasonalBadgeInfo)  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class IngameMatchResponse:
+    """Response from GET /core-game/v1/matches/{matchId}."""
+    MatchID: str | None = None
+    Version: int | None = None
+    State: str | None = None
+    MapID: str | None = None
+    ModeID: str | None = None
+    ProvisioningFlow: str | None = None
+    GamePodID: str | None = None
+    AllMUCName: str | None = None
+    TeamMUCName: str | None = None
+    TeamVoiceID: str | None = None
+    TeamMatchToken: str | None = None
+    IsReconnectable: bool | None = None
+    ConnectionDetails: _IngameConnectionDetails | dict[str, object] | None = None
+    PostGameDetails: _IngamePostGameDetails | dict[str, object] | None = None
+    Players: list[_IngamePlayer] | list[dict[str, object]] | None = None
+    MatchmakingData: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.ConnectionDetails, dict):
+            known = {f.name for f in fields(_IngameConnectionDetails)}
+            self.ConnectionDetails = _IngameConnectionDetails(**{k: v for k, v in self.ConnectionDetails.items() if k in known})  # pyright: ignore[reportArgumentType]
+        if isinstance(self.PostGameDetails, dict):
+            known = {f.name for f in fields(_IngamePostGameDetails)}
+            self.PostGameDetails = _IngamePostGameDetails(**{k: v for k, v in self.PostGameDetails.items() if k in known})  # pyright: ignore[reportArgumentType]
+        if self.Players and isinstance(self.Players[0], dict):
+            known = {f.name for f in fields(_IngamePlayer)}
+            self.Players = [_IngamePlayer(**{k: v for k, v in p.items() if k in known}) for p in self.Players]  # pyright: ignore[reportArgumentType, reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
 
 
 # ------------ Game State Models ------------
