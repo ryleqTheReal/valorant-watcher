@@ -1032,6 +1032,125 @@ class IngameMatchResponse:
             self.Players = [_IngamePlayer(**{k: v for k, v in p.items() if k in known}) for p in self.Players]  # pyright: ignore[reportArgumentType, reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
 
 
+# ------------ Ingame Loadout Models ------------
+
+
+@dataclass
+class _LoadoutSocketItem:
+    """Inner item inside a socket slot."""
+    ID: str | None = None
+    TypeID: str | None = None
+
+
+@dataclass
+class _LoadoutSocket:
+    """A single socket on a weapon/item."""
+    ID: str | None = None
+    Item: _LoadoutSocketItem | dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.Item, dict):
+            self.Item = _LoadoutSocketItem(**self.Item)  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class _LoadoutItem:
+    """A weapon or equipment entry in the loadout."""
+    ID: str | None = None
+    TypeID: str | None = None
+    Sockets: dict[str, _LoadoutSocket] | dict[str, dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.Sockets:
+            first_val = next(iter(self.Sockets.values()))
+            if isinstance(first_val, dict):
+                self.Sockets = {
+                    k: _LoadoutSocket(**v) for k, v in self.Sockets.items()  # pyright: ignore[reportCallIssue]
+                }
+
+
+@dataclass
+class _LoadoutSpraySelection:
+    """A single spray selection."""
+    SocketID: str | None = None
+    SprayID: str | None = None
+    LevelID: str | None = None
+
+
+@dataclass
+class _LoadoutSprays:
+    """Spray selections container."""
+    SpraySelections: list[_LoadoutSpraySelection] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.SpraySelections and isinstance(self.SpraySelections[0], dict):
+            self.SpraySelections = [_LoadoutSpraySelection(**s) for s in self.SpraySelections]  # pyright: ignore[reportCallIssue]
+
+
+@dataclass
+class _LoadoutAESSelection:
+    """A single AES (expression) selection."""
+    SocketID: str | None = None
+    AssetID: str | None = None
+    TypeID: str | None = None
+
+
+@dataclass
+class _LoadoutExpressions:
+    """Expression selections container."""
+    AESSelections: list[_LoadoutAESSelection] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.AESSelections and isinstance(self.AESSelections[0], dict):
+            self.AESSelections = [_LoadoutAESSelection(**s) for s in self.AESSelections]  # pyright: ignore[reportCallIssue]
+
+
+@dataclass
+class _LoadoutData:
+    """A player's full loadout for a match."""
+    Subject: str | None = None
+    Sprays: _LoadoutSprays | dict[str, object] | None = None
+    Expressions: _LoadoutExpressions | dict[str, object] | None = None
+    DynamicOptions: dict[str, object] | None = None
+    Items: dict[str, _LoadoutItem] | dict[str, dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.Sprays, dict):
+            self.Sprays = _LoadoutSprays(**self.Sprays)  # pyright: ignore[reportArgumentType]
+        if isinstance(self.Expressions, dict):
+            self.Expressions = _LoadoutExpressions(**self.Expressions)  # pyright: ignore[reportArgumentType]
+        if self.Items:
+            first_val = next(iter(self.Items.values()))
+            if isinstance(first_val, dict):
+                self.Items = {
+                    k: _LoadoutItem(**v) for k, v in self.Items.items()  # pyright: ignore[reportCallIssue]
+                }
+
+
+@dataclass
+class _IngameLoadoutEntry:
+    """A single player's loadout entry in the response."""
+    CharacterID: str | None = None
+    Loadout: _LoadoutData | dict[str, object] | None = None
+    Subject: str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.Loadout, dict):
+            known = {f.name for f in fields(_LoadoutData)}
+            self.Loadout = _LoadoutData(**{k: v for k, v in self.Loadout.items() if k in known})  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class IngameLoadoutsResponse:
+    """Response from GET /core-game/v1/matches/{matchId}/loadouts."""
+    Loadouts: list[_IngameLoadoutEntry] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.Loadouts and isinstance(self.Loadouts[0], dict):
+            known = {f.name for f in fields(_IngameLoadoutEntry)}
+            self.Loadouts = [_IngameLoadoutEntry(**{k: v for k, v in entry.items() if k in known}) for entry in self.Loadouts]  # pyright: ignore[reportArgumentType, reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+
+
 # ------------ Game State Models ------------
 
 
