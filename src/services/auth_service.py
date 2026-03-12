@@ -25,19 +25,20 @@ from requests import Response
 
 from services.event_bus import EventBus, Event
 from utils.models import (
-    AccessTokenJWT, 
-    AccountXPResponse, 
-    EntitlementsTokenResponse, 
-    LockfileData, 
-    EndpointURI, 
-    MatchHistoryResponse, 
-    OwnedItemsResponse, 
-    PenaltiesResponse, 
-    PlayerLoadoutResponse, 
+    AccessTokenJWT,
+    AccountXPResponse,
+    EntitlementsTokenResponse,
+    LeaderboardResponse,
+    LockfileData,
+    EndpointURI,
+    MatchHistoryResponse,
+    OwnedItemsResponse,
+    PenaltiesResponse,
+    PlayerLoadoutResponse,
     PlayerMMRResponse,
-    PresenceResponse, 
-    RegionInfo, 
-    ValorantApiResponse, 
+    PresenceResponse,
+    RegionInfo,
+    ValorantApiResponse,
     VersionData
     )
 
@@ -69,6 +70,7 @@ class RiotSession:
     puuid: str = field(init=False, default="")
     headers: dict[str, str] = field(init=False, default_factory=dict)
     expires_at: float = field(init=False, default=0.0)
+    season_id: str = field(init=False, default="")
 
     def __post_init__(self) -> None:
         self._cancelled = asyncio.Event()
@@ -332,7 +334,10 @@ class RiotSession:
 
         # Update the httpx client to use the full auth headers for requests
         self.client.headers.update(self.headers)
-        logger.info(f"Authentication complete. PUUID: {self.puuid}")
+
+        # Fetch the current competitive season immediately so it's available for the entire session
+        self.season_id = await self._fetch_current_season()
+        logger.info(f"Authentication complete. PUUID: {self.puuid}, Season: {self.season_id}")
 
         # Start background token refresh
         self._start_proactive_refresh()
@@ -555,10 +560,57 @@ class RiotSession:
         response = await self.fetch("GET", "pd", EndpointURI(f"/match-details/v1/matches/{match_id}"))
         return response.json()   # pyright: ignore[reportAny]
     
+    async def general_get_leaderboard(self, start_index: int = 0, size: int = 510, query: str | None = None) -> LeaderboardResponse:
+        """Fetch the region's competitive leaderboard
+
+        Args:
+            season_id (str): The competitive season/act UUID
+            start_index (int): Index of the first entry to return. Defaults to 0
+            size (int): How many entries per page, 510 is maximum. Defaults to 510
+            query (str | None, optional): Optional username filter. Defaults to None."""
+
+        params: dict[str, str] = {"startIndex": str(start_index), "size": str(size)}
+        if query is not None:
+            params["query"] = query
+
+        response = await self.fetch(
+            "GET", "pd",
+            EndpointURI(f"/mmr/v1/leaderboards/affinity/{self.region.pd_shard}/queue/competitive/season/{self.season_id or await self._fetch_current_season()}"),
+            params=params,
+        )
+        return LeaderboardResponse(**response.json())  # pyright: ignore[reportAny]
+
+    async def _fetch_current_season(self) -> str:
+        """Fetch the content service and extract the current competitive season ID.
+
+        Called once during authentication so the season is available for the entire session.
+
+        Returns:
+            The active act's season UUID, or empty string if not found.
+        """
+        try:
+            response = await self.fetch(
+                "GET", "custom",
+                EndpointURI(f"https://shared.{self.region.pd_shard}.a.pvp.net/content-service/v3/content"),
+            )
+            data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
+            for season in data.get("Seasons", []):  # pyright: ignore[reportAny]
+                if season.get("IsActive") and season.get("Type") == "act":  # pyright: ignore[reportAny]
+                    season_id: str = season.get("ID", "")  # pyright: ignore[reportAny]
+                    logger.debug(f"Current competitive season: {season_id}")
+                    return season_id
+            logger.warning("No active competitive season found in content response")
+        except Exception as e:
+            logger.warning(f"Failed to fetch current season: {e}")
+        return ""
+
+    # ------- Local --------
+    
     async def local_get_presences(self) -> PresenceResponse:
         """Fetch all known presences"""
         response = await self.fetch("GET", "local", EndpointURI("/chat/v4/presences"))
         return PresenceResponse(**response.json())  # pyright: ignore[reportAny]
+    
 
     @property
     def is_rate_limited(self) -> bool:
