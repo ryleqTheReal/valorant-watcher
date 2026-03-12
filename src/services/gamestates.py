@@ -22,6 +22,7 @@ from services.request_scheduler import RequestScheduler
 from utils.models import (
     GameStateTransition,
     ItemTypes,
+    LockfileData,
     Presence,
     PresencePrivate,
     PresenceWebsocketEvent,
@@ -53,6 +54,7 @@ class GamestateHandler:
         ratelimit_offset: int = 60,
         initial_limit: int = 6,
         sustained_limit: int = 20,
+        aggressive_limit: int = 24,
     ) -> None:
         self.bus: EventBus = bus
         self._watermark_path: Path = watermark_path
@@ -63,8 +65,10 @@ class GamestateHandler:
         self._scheduler: RequestScheduler = RequestScheduler(
             initial_limit=initial_limit,
             sustained_limit=sustained_limit,
+            aggressive_limit=aggressive_limit,
         )
         self._match_collector: MatchCollector | None = None
+        self._presence_poll_task: asyncio.Task[None] | None = None
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
@@ -79,23 +83,104 @@ class GamestateHandler:
     def _register(self) -> None:
         """Subscribe to relevant events."""
         _ = self.bus.on(Event.AUTH_SUCCESS, self._on_auth_success, priority=5)
+        _ = self.bus.on(Event.VALORANT_OPENED, self._on_valorant_open, priority=5)
         _ = self.bus.on(Event.WEBSOCKET_EVENT, self._on_websocket_event, priority=5)
         _ = self.bus.on(Event.VALORANT_CLOSED, self._on_valorant_close, priority=5)
+        _ = self.bus.on(Event.RSO_LOGOUT, self._on_rso_logout, priority=5)
         _ = self.bus.on(Event.SHUTDOWN, self._on_shutdown, priority=0)
 
     # ------------------- Event Handlers -------------------
 
     async def _on_auth_success(self, data: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
-        """Store the authenticated session and initialize match collection."""
+        """Store the authenticated session,start match collection immediately
+
+        The match collector begins as soon as we're authenticated: no need
+        to wait for VALORANT to launch. 
+        If VALORANT opens later, the
+        scheduler is paused for 60s to let other apps do their thing
+        """
         self._session = data["session"]
-        self._scheduler.start()
+        self._scheduler.start(aggressive=True)
         self._match_collector = MatchCollector(
             session=self._session,  # pyright: ignore[reportArgumentType]
             bus=self.bus,
             scheduler=self._scheduler,
             watermark_path=self._watermark_path,
         )
-        logger.info(f"Gamestate tracker ready for puuid {self._puuid}")
+        self._match_collector.start()
+        logger.info(f"Gamestate tracker ready for puuid {self._puuid}, match collector started")
+
+    async def _on_valorant_open(self, data: LockfileData) -> None:  # pyright: ignore[reportUnusedParameter]
+        """Valorant launched -> pause scheduler for 60s, then poll for initial gamestate.
+
+        Pauses the match collector to let other apps (tracker.gg, etc.)
+        make their initial burst of requests without competing for rate
+        limit budget.  After the cooldown, polls /chat/v4/presences to
+        get the baseline sessionLoopState.
+        """
+        if self._session is None or self._current_state is not None:
+            return
+
+        self._presence_poll_task = asyncio.create_task(self._on_valorant_open_sequence())
+
+    async def _on_valorant_open_sequence(self) -> None:
+        """Pause scheduler and poll for initial gamestate immediately.
+
+        The presence endpoint is local (no rate limit), so we start
+        polling right away while the scheduler is paused.  Once the
+        initial state is found, _on_state_changed triggers the normal
+        state handler which waits its own offset and then resumes.
+        """
+        if self._session is None:
+            return
+
+        logger.info("Valorant opened pausing scheduler, polling for initial gamestate")
+        self._scheduler.pause()
+
+        await self._poll_initial_presence()
+
+    async def _poll_initial_presence(self) -> None:
+        """Poll /chat/v4/presences until we find our own sessionLoopState."""
+        if self._session is None:
+            return
+
+        logger.info("Polling /chat/v4/presences for initial gamestate...")
+
+        while self._current_state is None:
+            try:
+                presence_data = await self._session.local_get_presences()
+
+                if presence_data.presences:
+                    for p in presence_data.presences:
+                        if not isinstance(p, Presence):
+                            continue
+                        if p.puuid != self._puuid or p.product != "valorant":
+                            continue
+
+                        state_str = self._extract_loop_state(p)
+                        if state_str and state_str in _VALID_STATES:
+                            new_state = SessionLoopState(state_str)
+                            self._current_state = new_state
+
+                            transition = GameStateTransition(
+                                previous=None,
+                                current=new_state,
+                                puuid=self._puuid or "",
+                                presence=p,
+                            )
+                            logger.info(f"Initial gamestate from presence poll: {new_state.value}")
+                            await self._on_state_changed(transition)
+                            return
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.debug(f"Presence poll attempt failed: {e}")
+
+            await asyncio.sleep(5)
+
+        if self._current_state is None:  # pyright: ignore[reportUnnecessaryComparison]
+            logger.debug("Presence polling stopped (session closed or state already set)")
 
     async def _on_websocket_event(self, data: PresenceWebsocketEvent) -> None:
         """Check each presence event for a sessionLoopState change."""
@@ -135,6 +220,10 @@ class GamestateHandler:
 
     async def _on_valorant_close(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
         """Valorant closed -> reset tracking state."""
+        self._reset()
+
+    async def _on_rso_logout(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
+        """Riot Client logged out -> reset tracking state."""
         self._reset()
 
     async def _on_shutdown(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
@@ -270,12 +359,8 @@ class GamestateHandler:
         self._scheduler.enqueue_general(self._check_penalties, "penalties")
         self._scheduler.enqueue_general(self._check_mmr, "mmr")
 
-        # Start match collection after general checks are queued.
-        # The collector self-schedules: each completed request enqueues
-        # the next one into the general queue, naturally interleaving
-        # with other general requests.
-        if self._match_collector:
-            self._match_collector.start()
+        # Match collector is already running (started on AUTH_SUCCESS).
+        # Its self-scheduled requests interleave with these general checks.
 
     # ------------------- Helpers -------------------
 
@@ -318,6 +403,9 @@ class GamestateHandler:
         if self._match_collector:
             self._match_collector.stop()
             self._match_collector = None
+        if self._presence_poll_task and not self._presence_poll_task.done():
+            _ = self._presence_poll_task.cancel()
+            self._presence_poll_task = None
         self._scheduler.stop()
         self._cancel_pending_task()
         if self._current_state is not None:
