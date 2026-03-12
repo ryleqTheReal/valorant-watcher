@@ -14,7 +14,7 @@ import time
 from http import HTTPStatus
 import re
 from collections.abc import Generator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Literal
 from pathlib import Path
 from urllib.parse import urlencode
@@ -34,7 +34,8 @@ from utils.models import (
     OwnedItemsResponse, 
     PenaltiesResponse, 
     PlayerLoadoutResponse, 
-    PlayerMMRResponse, 
+    PlayerMMRResponse,
+    PresenceResponse, 
     RegionInfo, 
     ValorantApiResponse, 
     VersionData
@@ -158,43 +159,74 @@ class RiotSession:
             logger.info(f"Rate-limit active, waiting {remaining}s remaining")
             await self._cancellable_sleep(remaining)
 
-    async def _refresh_entitlements(self) -> None:
+    async def _refresh_entitlements(self, max_retries: int = 10) -> None:
         """Re-fetch entitlements and update session headers.
 
         Uses a lock so that concurrent 401 responses only trigger one refresh.
+        Retries up to max_retries times with increasing delay on failure.
         """
         async with self._refresh_lock:
-            logger.info("Refreshing entitlements...")
-            try:
-                response = await self.client.get(
-                    f"{self.lockfile.base_url}/entitlements/v1/token"
-                )
-                data: EntitlementsTokenResponse = EntitlementsTokenResponse(**response.json())  # pyright: ignore[reportAny]
+            for attempt in range(1, max_retries + 1):
+                logger.info(f"Refreshing entitlements (attempt {attempt}/{max_retries})...")
+                try:
+                    response = await self.client.get(
+                        f"{self.lockfile.base_url}/entitlements/v1/token",
+                        headers={"Authorization": self.lockfile.auth_header},
+                    )
 
-                if data.message is not None:
-                    logger.error(f"Entitlements refresh failed: {data.message}")
+                    if response.status_code != 200:
+                        logger.warning(
+                            f"Entitlements endpoint returned HTTP {response.status_code} (attempt {attempt}/{max_retries}), body: {response.text!r}"
+                        )
+                        if attempt < max_retries:
+                            delay = attempt * 2.0
+                            logger.info(f"Retrying entitlements refresh in {delay}s...")
+                            await self._cancellable_sleep(delay)
+                        continue
+
+                    data: EntitlementsTokenResponse = EntitlementsTokenResponse(**response.json())  # pyright: ignore[reportAny]
+
+                    if data.message is not None:
+                        logger.warning(
+                            f"Entitlements refresh rejected: {data.message!r} (attempt {attempt}/{max_retries})"
+                        )
+                        if attempt < max_retries:
+                            delay = attempt * 2.0
+                            logger.info(f"Retrying entitlements refresh in {delay}s...")
+                            await self._cancellable_sleep(delay)
+                        continue
+
+                    access_token: str = data.accessToken
+                    entitlements_token: str = data.token
+                    self.puuid = data.subject
+
+                    decoded = self._decode_access_token(access_token)
+                    self.expires_at = float(decoded.exp)
+
+                    logger.debug(
+                        f"Refreshed entitlements: subject={data.subject}, issuer={data.issuer}, expires_at={self.expires_at}"
+                    )
+
+                    self.headers.update({
+                        "Authorization": f"Bearer {access_token}",
+                        "X-Riot-Entitlements-JWT": entitlements_token,
+                    })
+                    self.client.headers.update(self.headers)
+
+                    logger.info("Entitlements refreshed successfully")
+
+                    # Restart the proactive refresh timer
+                    self._start_proactive_refresh()
                     return
 
-                access_token: str = data.accessToken
-                entitlements_token: str = data.token
-                self.puuid = data.subject
+                except Exception as e:
+                    logger.warning(f"Entitlements refresh error (attempt {attempt}/{max_retries}): {e}")
+                    if attempt < max_retries:
+                        delay = attempt * 2.0
+                        logger.info(f"Retrying entitlements refresh in {delay}s...")
+                        await self._cancellable_sleep(delay)
 
-                decoded = self._decode_access_token(access_token)
-                self.expires_at = float(decoded.exp)
-
-                self.headers.update({
-                    "Authorization": f"Bearer {access_token}",
-                    "X-Riot-Entitlements-JWT": entitlements_token,
-                })
-                self.client.headers.update(self.headers)
-
-                logger.info("Entitlements refreshed successfully")
-
-                # Restart the proactive refresh timer
-                self._start_proactive_refresh()
-
-            except Exception as e:
-                logger.error(f"Failed to refresh entitlements: {e}")
+            logger.error(f"Entitlements refresh failed after {max_retries} attempts")
 
     def _start_proactive_refresh(self) -> None:
         """Spawn a background task that refreshes entitlements at 75% of token lifetime."""
@@ -324,7 +356,8 @@ class RiotSession:
         """
         try:
             decoded_raw: dict[str, Any] = jwt_decode(access_token, options={"verify_signature": False})  # pyright: ignore[reportExplicitAny]
-            decoded = AccessTokenJWT(**decoded_raw)  # pyright: ignore[reportAny]
+            known_fields: set[str] = {f.name for f in fields(AccessTokenJWT)}
+            decoded = AccessTokenJWT(**{k: v for k, v in decoded_raw.items() if k in known_fields})  # pyright: ignore[reportAny]
             logger.debug(f"Access token expires at {decoded.exp} (sub: {decoded.sub})")
             return decoded
         except (DecodeError, TypeError, KeyError) as e:
@@ -451,6 +484,11 @@ class RiotSession:
             raise VersionNotFoundError() from e
 
     # ------------------- API Wrappers -------------------
+    
+    # I have come up with the following naming scheme:
+    # general_* => The endpoint is available after user logs in aka RSO_LOGIN event
+    # local_*   => The endpoint is available after VALORANT is officially loaded => VALORANT_OPENED + polling until success
+    # state_*   => The endpoint is available when its sessionLoopState is reached => PREGAME, INGAME 
 
     async def general_get_loadout(self) -> PlayerLoadoutResponse:
         """Fetch the player's current loadout (skins, sprays, identity)."""
@@ -506,6 +544,11 @@ class RiotSession:
         """Fetch full match details. Returns raw dict (structure too complex to fully type)."""
         response = await self.fetch("GET", "pd", EndpointURI(f"/match-details/v1/matches/{match_id}"))
         return response.json()   # pyright: ignore[reportAny]
+    
+    async def local_get_presences(self) -> PresenceResponse:
+        """Fetch all known presences"""
+        response = await self.fetch("GET", "local", EndpointURI("/chat/v4/presences"))
+        return PresenceResponse(**response.json())  # pyright: ignore[reportAny]
 
     @property
     def is_rate_limited(self) -> bool:
@@ -517,9 +560,9 @@ class AuthHandler:
     Manages the auth lifecycle based on event bus events.
 
     Registers itself with the bus and reacts to:
-    - VALORANT_OPENED   -> build session
-    - VALORANT_CLOSED -> tear down session
-    - SHUTDOWN            -> cleanup
+    - RSO_LOGIN    -> build session (triggered as soon as Riot Client is logged in)
+    - RSO_LOGOUT   -> tear down session
+    - SHUTDOWN     -> cleanup
     """
 
     def __init__(self, bus: EventBus, ratelimit_timeout: int = 60) -> None:
@@ -530,15 +573,15 @@ class AuthHandler:
 
     def _register(self) -> None:
         """Subscribe to relevant events."""
-        _ = self.bus.on(Event.VALORANT_OPENED, self._on_valorant_open, priority=10)
-        _ = self.bus.on(Event.VALORANT_CLOSED, self._on_valorant_close, priority=10)
+        _ = self.bus.on(Event.RSO_LOGIN, self._on_rso_login, priority=10)
+        _ = self.bus.on(Event.RSO_LOGOUT, self._on_rso_logout, priority=10)
         _ = self.bus.on(Event.SHUTDOWN, self._on_shutdown, priority=0)
 
-    # ------------------- Event Handlers: ------------------- 
-    # IMPORTANT: Make sure that each handdler funtion allows for a data parameter even if it's not used IMPORTANT
+    # ------------------- Event Handlers: -------------------
+    # IMPORTANT: Make sure that each handler function allows for a data parameter even if it's not used IMPORTANT
 
-    async def _on_valorant_open(self, data: LockfileData) -> None:
-        """Valorant started -> authenticate"""
+    async def _on_rso_login(self, data: LockfileData) -> None:
+        """Riot Client logged in -> authenticate"""
 
         logger.info(f"Authenticating against {data.base_url} ...")
 
@@ -554,13 +597,13 @@ class AuthHandler:
             await self._cleanup_session()
             _ = await self.bus.emit(Event.AUTH_FAILED, AuthenticationError(str(e)))
 
-    async def _on_valorant_close(self, data: Any = None) -> None:  # pyright: ignore[reportAny, reportUnusedParameter, reportExplicitAny]
-        """Valorant closed -> tear down session"""
-        logger.info("Valorant closed - cleaning up session")
+    async def _on_rso_logout(self, data: Any = None) -> None:  # pyright: ignore[reportAny, reportUnusedParameter, reportExplicitAny]
+        """Riot Client logged out -> tear down session"""
+        logger.info("RSO logout - cleaning up session")
         await self._cleanup_session()
 
     async def _on_shutdown(self, data: Any = None) -> None: # pyright: ignore[reportAny, reportUnusedParameter, reportExplicitAny]
-        """App is shutting down """
+        """App is shutting down"""
         await self._cleanup_session()
 
     async def _cleanup_session(self, data: Any = None) -> None: # pyright: ignore[reportAny, reportUnusedParameter, reportExplicitAny]
