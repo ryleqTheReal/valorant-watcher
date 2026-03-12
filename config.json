@@ -4,5 +4,8 @@
     "collect_interval": 60,
     "enable_data_sending": true,
     "ratelimit_timeout": 60,
-    "ratelimit_offset": 60
+    "ratelimit_offset": 60,
+    "ratelimit_initial_limit": 6,
+    "ratelimit_sustained_limit": 20,
+    "ratelimit_aggressive_limit": 24
 }
