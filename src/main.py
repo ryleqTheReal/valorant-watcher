@@ -87,6 +87,15 @@ class ValorantStatsApp:
         _ = self.bus.on(Event.PREGAME_MATCH_UPDATED, _on_pregame_update, priority=0)
         # --- END TEMP ---
 
+        # --- TEMP: log ingame match data ---
+        async def _on_ingame_update(data: object) -> None:
+            from utils.models import IngameMatchResponse
+            if isinstance(data, IngameMatchResponse):
+                logger.info(f"[INGAME] Match: {data.MatchID} | State: {data.State} | Map: {data.MapID}")
+
+        _ = self.bus.on(Event.INGAME_MATCH_UPDATED, _on_ingame_update, priority=0)
+        # --- END TEMP ---
+
         logger.info("=" * 60)
         logger.info("  Valorant Stats Collector started")
         logger.info(f"  Match dump: {match_dump_path}")
