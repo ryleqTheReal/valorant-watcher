@@ -39,6 +39,7 @@ class Event(Enum):
     PENALTIES_UPDATED = "PENALTIES_UPDATED"     # Emitted when the user's penalties updated
     MMR_HISTORY_UPDATED = "MMR_HISTORY_UPDATED" # The player's MMR history has updated
     MATCH_DETAIL_FETCHED = "MATCH_DETAIL_FETCHED" # A match's full details have been fetched
+    LEADERBOARD_FETCHED = "LEADERBOARD_FETCHED" # Leaderboard data has been retrieved
 
 IGNORE_EVENTS = [
     "AUTH_SUCCESS", 
