@@ -671,6 +671,13 @@ class MatchCollector:
         if not players:
             raise LeaderboardFallbackError(message="Leaderboard returned no players")
 
+        # Seed the unvisited pool with all leaderboard players
+        for p in players:
+            p_puuid: str = p.puuid  # pyright: ignore[reportUnknownMemberType, reportAssignmentType, reportUnknownVariableType, reportAttributeAccessIssue]
+            if p_puuid and p_puuid != self.puuid and p_puuid not in self._watermark.dig_visited:
+                self._unvisited_players.add(p_puuid)
+        logger.info(f"Fallback: seeded {len(self._unvisited_players)} leaderboard players into unvisited pool")
+
         random.shuffle(players)
 
         for player in players:
