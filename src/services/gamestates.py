@@ -15,6 +15,8 @@ from collections.abc import Awaitable
 
 from pathlib import Path
 
+import httpx
+
 from services.auth_service import RiotSession
 from services.event_bus import EventBus, Event
 from services.match_collector import MatchCollector
@@ -69,6 +71,7 @@ class GamestateHandler:
         )
         self._match_collector: MatchCollector | None = None
         self._presence_poll_task: asyncio.Task[None] | None = None
+        self._pregame_poll_task: asyncio.Task[None] | None = None
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
@@ -239,6 +242,7 @@ class GamestateHandler:
         purge stale state-bound requests before dispatching the new handler.
         """
         self._cancel_pending_task()
+        self._cancel_pregame_poll()
         # This makes the state queue be cleared and go to sleep
         self._scheduler.on_state_change()
 
@@ -269,16 +273,20 @@ class GamestateHandler:
     async def _on_enter_pregame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player entered agent select.
 
-        Short window (~10s usable after offset).  State-specific requests
-        run first so we don't waste the window on general data.
+        GLZ endpoints are not rate-limited, so we spawn a 1s
+        polling coroutine that runs independently of the scheduler.
+        It dies on 404 (pregame ended server-side) or state change
+        (cancelled by _on_state_changed)
+
+        The general-check pipeline still runs after the offset wait.
         """
         if not self._session:
             return
 
-        await self._wait_ratelimit_offset()
+        # GLZ endpoints are not rate-limited — poll independently
+        self._pregame_poll_task = asyncio.create_task(self._poll_pregame_match())
 
-        # TODO: Enqueue state-specific pregame requests (high priority)
-        # e.g. self._scheduler.enqueue_state(self._check_pregame_match, "pregame match")
+        await self._wait_ratelimit_offset()
 
         self._enqueue_general_checks()
         # This is mandatory to resume the state queue
@@ -398,6 +406,12 @@ class GamestateHandler:
             logger.info("Cancelled pending data collection (state changed)")
         self._pending_task = None
 
+    def _cancel_pregame_poll(self) -> None:
+        """Cancel the pregame polling coroutine if running"""
+        if self._pregame_poll_task and not self._pregame_poll_task.done():
+            _ = self._pregame_poll_task.cancel()
+        self._pregame_poll_task = None
+
     def _reset(self) -> None:
         """Clear all tracking state."""
         if self._match_collector:
@@ -406,6 +420,7 @@ class GamestateHandler:
         if self._presence_poll_task and not self._presence_poll_task.done():
             _ = self._presence_poll_task.cancel()
             self._presence_poll_task = None
+        self._cancel_pregame_poll()
         self._scheduler.stop()
         self._cancel_pending_task()
         if self._current_state is not None:
@@ -416,6 +431,49 @@ class GamestateHandler:
         self._owned_item_count = None
 
 # ---------------- Helper API Wrapper Functions ----------------
+
+    async def _poll_pregame_match(self) -> None:
+        """Poll pregame match data at 1s intervals (GLZ is not rate-limited)
+
+        Gets the match ID once, then polls the match endpoint every second
+        
+        Emits PREGAME_MATCH_UPDATED whenever the 'Version' field changes
+        
+        Stops on 404 (pregame ended server-side) or cancellation (state change)
+        """
+        
+        if not self._session:
+            return
+
+        try:
+            match_id = await self._session.pregame_get_player()
+            if not match_id:
+                logger.warning("No pregame match ID returned")
+                return
+
+            logger.info(f"Pregame poll started for match {match_id}")
+            pregame_version: int | None = None
+
+            while True:
+                try:
+                    match_data = await self._session.pregame_get_match(match_id)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 404:
+                        logger.info("Pregame poll ended: 404 (match no longer in pregame)")
+                        return
+                    raise
+
+                if match_data.Version != pregame_version:
+                    pregame_version = match_data.Version
+                    _ = await self.bus.emit(Event.PREGAME_MATCH_UPDATED, match_data)
+                    logger.debug(f"Pregame match updated: version {pregame_version}")
+
+                await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            logger.info("Pregame poll cancelled (state changed)")
+        except Exception as e:
+            logger.warning(f"Pregame poll failed: {type(e).__name__}: {e}")
 
     async def _check_loadout(self) -> None:
         """Checks whether the user has updated their loadout."""
