@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 class Event(Enum):
     """All events that can occur in the system."""
 
+    RSO_LOGIN = "RSO_LOGIN"                     # Riot Client logged in (lockfile + RSO 200)
+    RSO_LOGOUT = "RSO_LOGOUT"                   # Riot Client logged out (RSO non-200 / lockfile gone)
     VALORANT_OPENED = "VALORANT_OPENED"         # Valorant process detected, lockfile read
     VALORANT_CLOSED = "VALORANT_CLOSED"         # Valorant process terminated
     AUTH_SUCCESS = "AUTH_SUCCESS"               # Riot auth succeeded
@@ -71,7 +73,6 @@ class EventBus:
 
     def __init__(self) -> None:
         self._listeners: dict[Event, list[Listener]] = {e: [] for e in Event}
-        self._history: list[tuple[Event, object]] = []
 
     # -- Registration ----------------------------------------------------------
 
@@ -128,8 +129,7 @@ class EventBus:
         """
         
         if event.name not in IGNORE_EVENTS:
-            logger.info(f"Event: {event.name}" + (f" | data={data}" if data else "")) 
-        self._history.append((event, data))
+            logger.info(f"Event: {event.name}" + (f" | data={data}" if data else ""))
 
         results: list[object] = []
         to_remove: list[Listener] = []
@@ -158,12 +158,6 @@ class EventBus:
 
 
 
-
-    # Debug helpers
-
-    @property
-    def history(self) -> list[tuple[Event, object]]:
-        return self._history.copy()
 
     def listener_count(self, event: Event) -> int:
         return len(self._listeners[event])
