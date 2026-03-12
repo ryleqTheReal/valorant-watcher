@@ -287,7 +287,7 @@ class GamestateHandler:
         if not self._session:
             return
 
-        # GLZ endpoints are not rate-limited — poll independently
+        # GLZ endpoints are not rate-limited, poll independently
         self._pregame_poll_task = asyncio.create_task(self._poll_pregame_match())
 
         await self._wait_ratelimit_offset()
@@ -306,8 +306,9 @@ class GamestateHandler:
         if not self._session:
             return
 
-        # GLZ endpoints are not rate-limited — fetch directly
+        # GLZ endpoints are not rate-limited, fetch directly
         await self._fetch_ingame_match()
+        await self._fetch_ingame_loadouts()
 
         await self._wait_ratelimit_offset()
 
@@ -502,6 +503,35 @@ class GamestateHandler:
             logger.info(f"Ingame match loaded: {match_id}")
         except Exception as e:
             logger.warning(f"Failed to fetch ingame match: {type(e).__name__}: {e}")
+
+    async def _fetch_ingame_loadouts(self) -> None:
+        """Fetch player loadouts for the active match (GLZ is not rate-limited).
+
+        Retries with a 2s delay until successful, match ends, or cancelled.
+        This is the most valuable data, we never give up while the match is active.
+        """
+        if not self._session or not self._active_match_id:
+            return
+
+        match_id = self._active_match_id
+
+        while True:
+            try:
+                loadouts = await self._session.ingame_get_loadouts(match_id)
+                _ = await self.bus.emit(Event.INGAME_LOADOUTS_FETCHED, loadouts)
+                logger.info(f"Ingame loadouts fetched for match {match_id}")
+                return
+            except asyncio.CancelledError:
+                logger.info("Ingame loadouts fetch cancelled (state changed)")
+                raise
+            except Exception as e:
+                logger.warning(f"Failed to fetch ingame loadouts: {type(e).__name__}: {e}, retrying in 2s")
+                await asyncio.sleep(2)
+
+                # Check if match is still active (state may have changed during sleep)
+                if self._active_match_id != match_id:
+                    logger.info("Ingame loadouts fetch aborted: match ended")
+                    return
 
     async def _check_loadout(self) -> None:
         """Checks whether the user has updated their loadout."""
