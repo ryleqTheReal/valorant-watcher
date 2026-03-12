@@ -45,6 +45,7 @@ from typing import Any
 from services.auth_service import RiotSession
 from services.event_bus import EventBus, Event
 from services.request_scheduler import RequestScheduler
+from utils.exceptions import IncorrectPaginationError
 from utils.models import AccountProgress, MatchHistoryEntry, MatchHistoryResponse, MatchWatermark
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -188,7 +189,8 @@ class MatchCollector:
     # --------- Phase 1: Fresh ---------
 
     async def _fetch_fresh_page(self) -> None:
-        """Fetch one page of match history, collecting new matches"""
+        """Fetch one page of match history, collecting new matche"""
+        
         if not self._running:
             return
 
@@ -270,7 +272,7 @@ class MatchCollector:
     # --------- Phase 2: Legacy ---------
 
     async def _fetch_legacy_page(self) -> None:
-        """Fetch one page of legacy match history, skipping known matches."""
+        """Fetch one page of legacy match history, skipping known matches"""
         if not self._running:
             return
 
@@ -282,13 +284,16 @@ class MatchCollector:
                 start_index=self._page_index,
                 end_index=self._page_index + PAGE_SIZE,
             )
-        except Exception as e:
-            logger.warning(f"Failed to fetch legacy page {self._page_index}: {e}")
-            # Don't retry the same page, mark legacy as complete
+        except IncorrectPaginationError:
+            logger.warning("Reached end of legacy pages")
             self._account.legacy_complete = True
             self._save_watermark()
-            logger.info("Legacy phase stopped due to API error (likely past end of history)")
-            self._enqueue_next()
+            self._transition_to_dig()
+            return
+        except Exception as e:
+            logger.warning(f"Failed to fetch legacy page {self._page_index}: {e}")
+            logger.info("Legacy phase stopped due to unexpected error, transitioning to dig to avoid gaps")
+            self._transition_to_dig()
             return
 
         logger.debug(f"Legacy: response Total={response.Total}, BeginIndex={response.BeginIndex}, EndIndex={response.EndIndex}, History length={len(response.History or [])}")
@@ -483,7 +488,7 @@ class MatchCollector:
             self._dig_walk_start()
 
     async def _dig_fetch_detail(self, match_id: str) -> None:
-        """Fetch match detail during DFS, harvest players, then drain next.
+        """Fetch match detail during DFS, harvest players, then drain next
 
         After fetching:
         1. harvest all players into the unvisited pool
