@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from http import HTTPStatus
 from pathlib import Path
 from enum import Enum
@@ -84,6 +84,7 @@ class AppConfig:
     ratelimit_offset: int = 60              # Seconds to wait after state change before making API calls
     ratelimit_initial_limit: int = 6        # Max requests in the first minute after offset ends
     ratelimit_sustained_limit: int = 20     # Max requests per minute after the first window
+    ratelimit_aggressive_limit: int = 24    # Max requests per minute when no other apps are competing (pre-game, AFK)
 
     @classmethod
     def from_config_dict(cls, data: dict[str, object]) -> AppConfig:
@@ -200,6 +201,7 @@ class _JWTDat:
     """Session data from the JWT payload."""
     c: str = ""
     lid: str = ""
+    r: str = ""
 
 @dataclass
 class AccessTokenJWT:
@@ -226,11 +228,14 @@ class AccessTokenJWT:
 
     def __post_init__(self) -> None:
         if isinstance(self.pp, dict):
-            self.pp = _JWTPartialPayload(**self.pp)
+            known = {f.name for f in fields(_JWTPartialPayload)}
+            self.pp = _JWTPartialPayload(**{k: v for k, v in self.pp.items() if k in known})
         if isinstance(self.dat, dict):
-            self.dat = _JWTDat(**self.dat)
+            known = {f.name for f in fields(_JWTDat)}
+            self.dat = _JWTDat(**{k: v for k, v in self.dat.items() if k in known})
         if isinstance(self.plt, dict):
-            self.plt = _JWTPlatform(**self.plt)
+            known = {f.name for f in fields(_JWTPlatform)}
+            self.plt = _JWTPlatform(**{k: v for k, v in self.plt.items() if k in known})
 
 @dataclass
 class WebsocketEventWrapper[T]:
@@ -782,9 +787,12 @@ class MatchWatermark:
     all accounts to avoid redundant API calls:
 
     - fetched_matches: match IDs whose details have already been fetched
-      by *any* account in *any* phase — prevents duplicate detail requests.
+      by *any* account in *any* phase, prevents duplicate detail requests.
     - dig_visited: player PUUIDs whose match history has been explored
-      during the DFS dig phase — never re-dug.
+      during the DFS dig phase, never re-dug.
+    - dig_visited_matches: match IDs that have been visited as graph
+      vertices during the DFS dig phase, prevents re-visiting the same
+      match from a different player vertex.
 
     The unvisited player pool (dig_queue in the JSON file) is managed as
     an in-memory set by MatchCollector, not stored in this dataclass.
@@ -792,6 +800,7 @@ class MatchWatermark:
     accounts: dict[str, AccountProgress] = field(default_factory=dict)
     fetched_matches: set[str] = field(default_factory=set)
     dig_visited: set[str] = field(default_factory=set)
+    dig_visited_matches: set[str] = field(default_factory=set)
 
 
 # ------------ Game State Models ------------
