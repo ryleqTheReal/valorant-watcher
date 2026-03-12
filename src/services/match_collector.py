@@ -51,6 +51,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 PAGE_SIZE: int = 20
 DIG_RESTART_CHANCE: float = 0.15
+MAX_UNVISITED_PLAYERS: int = 5000
 
 
 class MatchCollector:
@@ -91,10 +92,10 @@ class MatchCollector:
 
         # central state, loaded from watermark
         self._watermark: MatchWatermark = MatchWatermark()
-        self._seen_ids: set[str] = set()
 
-        # Dig phase: unvisited player pool
+        # Dig phase: unvisited player pool and pending detail queue
         self._unvisited_players: set[str] = set()
+        self._dig_detail_queue: deque[str] = deque()
 
         self._load_watermark()
 
@@ -126,8 +127,9 @@ class MatchCollector:
         legacy_complete = acct.legacy_complete
         central_matches = len(self._watermark.fetched_matches)
         unvisited = len(self._unvisited_players)
-        visited = len(self._watermark.dig_visited)
-        logger.info(f"Match collector started ({newest_known=}, {oldest_fetched=}, {legacy_complete=}, {central_matches=}, {unvisited=}, {visited=})")
+        visited_players = len(self._watermark.dig_visited)
+        visited_matches = len(self._watermark.dig_visited_matches)
+        logger.info(f"Match collector started ({newest_known=}, {oldest_fetched=}, {legacy_complete=}, {central_matches=}, {unvisited=}, {visited_players=}, {visited_matches=})")
         self._enqueue_next()
 
     def stop(self) -> None:
@@ -190,6 +192,8 @@ class MatchCollector:
         if not self._running:
             return
 
+        logger.debug(f"Fresh: requesting startIndex={self._page_index}, endIndex={self._page_index + PAGE_SIZE}")
+
         try:
             response: MatchHistoryResponse = await self._session.general_get_history(
                 puuid=self.puuid,
@@ -198,8 +202,12 @@ class MatchCollector:
             )
         except Exception as e:
             logger.warning(f"Failed to fetch fresh page {self._page_index}: {e}")
+            # Don't retry the same page and treat as end of history
+            self._phase = "legacy"
             self._enqueue_next()
             return
+
+        logger.debug(f"Fresh: response Total={response.Total}, BeginIndex={response.BeginIndex}, EndIndex={response.EndIndex}, History length={len(response.History or [])}")
 
         history: list[MatchHistoryEntry] = [
             e for e in (response.History or []) if isinstance(e, MatchHistoryEntry)
@@ -207,6 +215,7 @@ class MatchCollector:
 
         acct = self._account
         hit_known: bool = False
+        pre_count: int = len(self._watermark.fetched_matches)
 
         for entry in history:
             # Track the absolute newest time seen this session
@@ -219,13 +228,13 @@ class MatchCollector:
                 hit_known = True
                 break
 
-            if entry.MatchID not in self._seen_ids:
-                self._seen_ids.add(entry.MatchID)
+            if entry.MatchID not in self._watermark.fetched_matches:
+                self._watermark.fetched_matches.add(entry.MatchID)
                 self._detail_queue.append(entry.MatchID)
 
         self._page_index += PAGE_SIZE
 
-        if hit_known or len(history) < PAGE_SIZE:
+        if hit_known or len(history) < PAGE_SIZE or self._page_index >= response.Total:
             # Fresh phase complete
             if self._first_fresh_time > 0:
                 acct.newest_known_time = self._first_fresh_time
@@ -235,16 +244,23 @@ class MatchCollector:
             if acct.oldest_fetched_time == 0 and history:
                 oldest_in_batch: int = min(
                     (e.GameStartTime for e in history
-                     if isinstance(e, MatchHistoryEntry) and e.MatchID in self._seen_ids),  # pyright: ignore[reportUnnecessaryIsInstance]
+                     if isinstance(e, MatchHistoryEntry) and e.MatchID in self._watermark.fetched_matches),  # pyright: ignore[reportUnnecessaryIsInstance]
                     default=0,
                 )
                 if oldest_in_batch > 0:
                     acct.oldest_fetched_time = oldest_in_batch
 
-            new_count = len(self._seen_ids) - len(self._watermark.fetched_matches)
+            new_count = len(self._watermark.fetched_matches) - pre_count
             logger.info(
                 f"Fresh phase complete: {new_count} new match(es), page_index={self._page_index}"
             )
+
+            # If we've already covered all matches, skip legacy entirely
+            if response.Total == 0 or self._page_index >= response.Total:
+                acct.legacy_complete = True
+                self._save_watermark()
+                logger.info("No legacy matches to fetch (all history covered by fresh phase)")
+
             self._phase = "legacy"
             # page_index continues from where fresh left off so we can
             # skip through the known window into legacy territory
@@ -258,6 +274,8 @@ class MatchCollector:
         if not self._running:
             return
 
+        logger.debug(f"Legacy: requesting startIndex={self._page_index}, endIndex={self._page_index + PAGE_SIZE}")
+
         try:
             response: MatchHistoryResponse = await self._session.general_get_history(
                 puuid=self.puuid,
@@ -266,8 +284,14 @@ class MatchCollector:
             )
         except Exception as e:
             logger.warning(f"Failed to fetch legacy page {self._page_index}: {e}")
+            # Don't retry the same page, mark legacy as complete
+            self._account.legacy_complete = True
+            self._save_watermark()
+            logger.info("Legacy phase stopped due to API error (likely past end of history)")
             self._enqueue_next()
             return
+
+        logger.debug(f"Legacy: response Total={response.Total}, BeginIndex={response.BeginIndex}, EndIndex={response.EndIndex}, History length={len(response.History or [])}")
 
         history: list[MatchHistoryEntry] = [
             e for e in (response.History or []) if isinstance(e, MatchHistoryEntry)
@@ -276,16 +300,16 @@ class MatchCollector:
         acct = self._account
 
         for entry in history:
-            if entry.MatchID in self._seen_ids:
+            if entry.MatchID in self._watermark.fetched_matches:
                 continue
 
             # Skip matches inside the already-known window
             if (acct.oldest_fetched_time > 0
                     and entry.GameStartTime >= acct.oldest_fetched_time):
-                self._seen_ids.add(entry.MatchID)
+                self._watermark.fetched_matches.add(entry.MatchID)
                 continue
 
-            self._seen_ids.add(entry.MatchID)
+            self._watermark.fetched_matches.add(entry.MatchID)
             self._detail_queue.append(entry.MatchID)
 
             # Extend the known window downward
@@ -295,7 +319,7 @@ class MatchCollector:
 
         self._page_index += PAGE_SIZE
 
-        if len(history) < PAGE_SIZE:
+        if len(history) < PAGE_SIZE or self._page_index >= response.Total:
             acct.legacy_complete = True
             self._save_watermark()
             logger.info("Legacy phase complete: all historical matches discovered")
@@ -317,9 +341,6 @@ class MatchCollector:
             response: dict[str, Any] = await self._session.general_get_details(match_id)  # pyright: ignore[reportExplicitAny]
             _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, response)
 
-            # Mark as centrally fetched so no other account re-fetches it
-            self._watermark.fetched_matches.add(match_id)
-
             # Harvest player PUUIDs into the unvisited pool for dig phase
             self._harvest_players(response)
 
@@ -331,7 +352,10 @@ class MatchCollector:
     def _harvest_players(self, match_response: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
         """Extract player PUUIDs from a match detail response and add
         unvisited ones to the dig pool"""
-        
+
+        if len(self._unvisited_players) >= MAX_UNVISITED_PLAYERS:
+            return
+
         players: list[dict[str, Any]] = match_response.get("players", [])  # pyright: ignore[reportExplicitAny, reportAny]
         for player in players:
             puuid: str = player.get("subject", "")  # pyright: ignore[reportAny]
@@ -420,94 +444,121 @@ class MatchCollector:
             e for e in (response.History or []) if isinstance(e, MatchHistoryEntry)
         ]
 
-        # Find matches we haven't seen yet
-        unfetched: list[MatchHistoryEntry] = [
-            e for e in history if e.MatchID not in self._seen_ids
+        # Queue matches not yet visited as DFS graph vertices
+        unvisited: list[MatchHistoryEntry] = [
+            e for e in history if e.MatchID not in self._watermark.dig_visited_matches
         ]
 
-        if not unfetched:
-            # Dead end => all matches already known => restart
-            logger.debug(f"DFS dead end at player {target_puuid[:8]} (all matches known)")
+        if not unvisited:
+            # Dead end => all matches already visited => restart
+            logger.debug(f"DFS dead end at player {target_puuid[:8]} (all matches visited)")
             self._dig_walk_start()
             return
 
-        # Pick a single random unfetched match
-        chosen: MatchHistoryEntry = random.choice(unfetched)
-        self._seen_ids.add(chosen.MatchID)
+        for entry in unvisited:
+            self._watermark.fetched_matches.add(entry.MatchID)
+            self._dig_detail_queue.append(entry.MatchID)
 
-        self._scheduler.enqueue_general(
-            lambda mid=chosen.MatchID: self._dig_fetch_detail(mid),
-            f"dig detail {chosen.MatchID[:8]}",
-        )
+        logger.info(f"Dig: queued {len(unvisited)} match(es) from player {target_puuid[:8]} ({len(self._dig_detail_queue)} pending)")
+
+        # Start draining the dig detail queue
+        self._dig_drain_detail()
+
+    def _dig_drain_detail(self) -> None:
+        """Pop the next match from the dig detail queue and enqueue it
+
+        When the queue is empty, continue the DFS walk to a new player.
+        """
+        if not self._running:
+            return
+
+        if self._dig_detail_queue:
+            match_id: str = self._dig_detail_queue.popleft()
+            self._scheduler.enqueue_general(
+                lambda mid=match_id: self._dig_fetch_detail(mid),
+                f"dig detail {match_id[:8]}",
+            )
+        else:
+            # All queued details drained — continue the DFS walk
+            self._dig_walk_start()
 
     async def _dig_fetch_detail(self, match_id: str) -> None:
-        """Fetch match detail during DFS, then decide the next step
+        """Fetch match detail during DFS, harvest players, then drain next.
 
         After fetching:
         1. harvest all players into the unvisited pool
-        2. roll the 15% restart chance and if triggered, restart
-        3. pick a random unvisited player from THIS match to continue
-           the walk deeper. 
-           => If none exist => restart (dead end)
+        2. continue draining the dig detail queue
+        3. when the queue is empty, roll DFS decision (teleport or walk deeper)
         """
-        
+
         if not self._running:
             return
 
         try:
             response: dict[str, Any] = await self._session.general_get_details(match_id)  # pyright: ignore[reportExplicitAny]
             _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, response)
-            self._watermark.fetched_matches.add(match_id)
+
+            # Mark match as visited in the DFS graph
+            self._watermark.dig_visited_matches.add(match_id)
 
             # Harvest ALL players into the global unvisited pool
             self._harvest_players(response)
 
-            # --- DFS decision ---
-
-            # 15% teleportation: restart from a new random root
-            if random.random() < DIG_RESTART_CHANCE:
-                logger.debug(f"DFS teleport after match {match_id[:8]}")
-                self._dig_walk_start()
-                return
-
-            # Pick a random unvisited player from THIS match to go deeper
-            players: list[dict[str, Any]] = response.get("players", [])  # pyright: ignore[reportExplicitAny, reportAny]
-            candidates: list[str] = [
-                p.get("subject", "")  
-                for p in players
-                if p.get("subject", "")  
-                and p.get("subject", "") != self.puuid  
-                and p.get("subject", "") not in self._watermark.dig_visited  
-            ]
-
-            if not candidates:
-                # Dead end ?> all players in this match already visited
-                logger.debug(f"DFS dead end at match {match_id[:8]} (all players visited)")
-                self._dig_walk_start()
-                return
-
-            # Continue the walk deeper with a random player
-            next_player: str = random.choice(candidates)
-            self._unvisited_players.discard(next_player)
-            self._watermark.dig_visited.add(next_player)
-
-            logger.debug(f"DFS continuing: {match_id[:8]} => player {next_player[:8]}")
-            self._scheduler.enqueue_general(
-                lambda p=next_player: self._dig_fetch_history(p),
-                f"dig history {next_player[:8]}",
-            )
-
         except Exception as e:
             logger.warning(f"Dig: failed to fetch detail for {match_id[:8]}: {e}")
+
+        # If there are more queued details, drain them first
+        if self._dig_detail_queue:
+            self._dig_drain_detail()
+            return
+
+        # Queue drained. DFS decision for next walk step
+
+        # 15% teleportation: restart from a new random root
+        if random.random() < DIG_RESTART_CHANCE:
+            logger.debug(f"DFS teleport after match {match_id[:8]}")
             self._dig_walk_start()
+            return
+
+        # Pick a random unvisited player from the last match to go deeper
+        try:
+            players: list[dict[str, Any]] = response.get("players", [])  # pyright: ignore[reportExplicitAny, reportAny, reportPossiblyUnboundVariable]
+        except UnboundLocalError:
+            # response wasn't set because the last detail fetch failed
+            self._dig_walk_start()
+            return
+
+        candidates: list[str] = [
+            p.get("subject", "")
+            for p in players
+            if p.get("subject", "")
+            and p.get("subject", "") != self.puuid
+            and p.get("subject", "") not in self._watermark.dig_visited
+        ]
+
+        if not candidates:
+            # Dead end => all players in this match already visited
+            logger.debug(f"DFS dead end at match {match_id[:8]} (all players visited)")
+            self._dig_walk_start()
+            return
+
+        # Continue the walk deeper with a random player
+        next_player: str = random.choice(candidates)
+        self._unvisited_players.discard(next_player)
+        self._watermark.dig_visited.add(next_player)
+
+        logger.debug(f"DFS continuing: {match_id[:8]} => player {next_player[:8]}")
+        self._scheduler.enqueue_general(
+            lambda p=next_player: self._dig_fetch_history(p),
+            f"dig history {next_player[:8]}",
+        )
 
     # --------- Watermark Persistence ---------
 
     def _load_watermark(self) -> None:
         """Load collection progress from the local watermark file
 
-        Populates the central watermark seeds _seen_ids from the
-        persisted fetched_matches and restores the unvisited player pool
+        Populates the central watermark and restores the unvisited player pool
         """
         try:
             if not self._watermark_path.exists():
@@ -520,10 +571,12 @@ class MatchCollector:
             # --- Central state ---
             fetched: list[str] = raw.get("fetched_matches", [])  # pyright: ignore[reportAny]
             self._watermark.fetched_matches = set(fetched)
-            self._seen_ids = set(fetched)
 
             dig_visited: list[str] = raw.get("dig_visited", [])  # pyright: ignore[reportAny]
             self._watermark.dig_visited = set(dig_visited)
+
+            dig_visited_matches: list[str] = raw.get("dig_visited_matches", [])  # pyright: ignore[reportAny]
+            self._watermark.dig_visited_matches = set(dig_visited_matches)
 
             # Restore unvisited pool, pruning any that have since been visited
             dig_unvisited: list[str] = raw.get("dig_queue", [])  # pyright: ignore[reportAny]
@@ -563,6 +616,7 @@ class MatchCollector:
                 "fetched_matches": sorted(self._watermark.fetched_matches),
                 "dig_queue": unvisited_snapshot,
                 "dig_visited": sorted(self._watermark.dig_visited),
+                "dig_visited_matches": sorted(self._watermark.dig_visited_matches),
             }
 
             self._watermark_path.parent.mkdir(parents=True, exist_ok=True)
@@ -573,7 +627,7 @@ class MatchCollector:
             _ = tmp_path.replace(self._watermark_path)
 
             logger.debug(
-                f"Watermark saved ({len(self._watermark.fetched_matches)} matches, {len(self._watermark.accounts)} accounts, {len(self._watermark.dig_visited)} visited players)"
+                f"Watermark saved ({len(self._watermark.fetched_matches)} matches, {len(self._watermark.accounts)} accounts, {len(self._watermark.dig_visited)} visited players, {len(self._watermark.dig_visited_matches)} visited match vertices)"
             )
         except OSError as e:
             logger.warning(f"Failed to save watermark: {e}")
