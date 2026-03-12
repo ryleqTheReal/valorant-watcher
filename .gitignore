@@ -11,3 +11,4 @@ ingame*.json
 pregame*.json
 *.md
 *test.py
+data/

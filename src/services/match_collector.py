@@ -479,7 +479,7 @@ class MatchCollector:
                 f"dig detail {match_id[:8]}",
             )
         else:
-            # All queued details drained — continue the DFS walk
+            # all queued details drained continue the DFS walk
             self._dig_walk_start()
 
     async def _dig_fetch_detail(self, match_id: str) -> None:

@@ -124,7 +124,7 @@ class GamestateHandler:
         self._presence_poll_task = asyncio.create_task(self._on_valorant_open_sequence())
 
     async def _on_valorant_open_sequence(self) -> None:
-        """Pause scheduler and poll for initial gamestate immediately.
+        """Pause scheduler and poll for initial gamestate immediately
 
         The presence endpoint is local (no rate limit), so we start
         polling right away while the scheduler is paused.  Once the

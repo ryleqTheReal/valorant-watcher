@@ -134,7 +134,8 @@ class GameSocketHandler:
         self._thread.start()
 
     def _run_socket(self) -> None:
-        """Thread entry point — creates a new event loop and runs the websocket listener."""
+        """Thread entry point => creates a new event loop and runs the websocket listener"""
+        
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
