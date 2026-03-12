@@ -73,6 +73,7 @@ class GamestateHandler:
         self._valorant_open: bool = False
         self._presence_poll_task: asyncio.Task[None] | None = None
         self._pregame_poll_task: asyncio.Task[None] | None = None
+        self._active_match_id: str | None = None
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
@@ -298,16 +299,17 @@ class GamestateHandler:
     async def _on_enter_ingame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Match started (loading screen / gameplay).
 
-        State-specific requests (core-game data) run first, then
-        general checks fill the remaining window.
+        GLZ ingame endpoints are not rate-limited, so we fetch the match
+        data once directly and store the match ID for the duration of the
+        match. The general-check pipeline runs after the offset wait.
         """
         if not self._session:
             return
 
-        await self._wait_ratelimit_offset()
+        # GLZ endpoints are not rate-limited — fetch directly
+        await self._fetch_ingame_match()
 
-        # TODO: Enqueue state-specific ingame requests (high priority)
-        # e.g. self._scheduler.enqueue_state(self._check_coregame_match, "core-game match")
+        await self._wait_ratelimit_offset()
 
         self._enqueue_general_checks()
         # This is mandatory to resume the state queue
@@ -430,6 +432,7 @@ class GamestateHandler:
             logger.info("Gamestate tracker reset")
         self._session = None
         self._current_state = None
+        self._active_match_id = None
         self._loadout_version = None
         self._owned_item_count = None
 
@@ -477,6 +480,28 @@ class GamestateHandler:
             logger.info("Pregame poll cancelled (state changed)")
         except Exception as e:
             logger.warning(f"Pregame poll failed: {type(e).__name__}: {e}")
+
+    async def _fetch_ingame_match(self) -> None:
+        """Fetch ingame match data once (GLZ is not rate-limited).
+
+        Gets the match ID, stores it on self._active_match_id, fetches
+        the full match data, and emits INGAME_MATCH_UPDATED.
+        """
+        if not self._session:
+            return
+
+        try:
+            match_id = await self._session.ingame_get_player()
+            if not match_id:
+                logger.warning("No ingame match ID returned")
+                return
+
+            self._active_match_id = match_id
+            match_data = await self._session.ingame_get_match(match_id)
+            _ = await self.bus.emit(Event.INGAME_MATCH_UPDATED, match_data)
+            logger.info(f"Ingame match loaded: {match_id}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch ingame match: {type(e).__name__}: {e}")
 
     async def _check_loadout(self) -> None:
         """Checks whether the user has updated their loadout."""
