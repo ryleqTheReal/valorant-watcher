@@ -11,6 +11,7 @@ VERSION_NOT_FOUND_ERROR = "VERSION_NOT_FOUND_ERROR"
 FALLBACK_API_ERROR = "FALLBACK_API_ERROR"
 API_RUNTIME_ERROR = "API_RUNTIME_ERROR"
 INCORRECT_PAGINATION_ERROR = "INCORRECT_PAGINATION_ERROR"
+LEADERBOARD_FALLBACK_ERROR = "LEADERBOARD_FALLBACK_ERROR"
 
 class AppError(Exception):
     """Highest exception in hierarchy from which all other exceptions stem     
@@ -112,3 +113,11 @@ class IncorrectPaginationError(ApiRuntimeError):
         self.is_critical: bool = False
         self.message: str = message
         self.internal_status: str = INCORRECT_PAGINATION_ERROR
+
+class LeaderboardFallbackError(ApiRuntimeError):
+    """No leaderboard player yielded accessible match history to seed the dig phase"""
+    def __init__(self, *args: object, message: str = "Leaderboard fallback exhausted all players without finding match history") -> None:
+        super().__init__(*args)
+        self.is_critical: bool = False
+        self.message: str = message
+        self.internal_status: str = LEADERBOARD_FALLBACK_ERROR
