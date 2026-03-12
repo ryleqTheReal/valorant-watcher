@@ -86,7 +86,7 @@ class RiotSession:
         
     async def fetch(self,
                     method: Literal["GET", "POST", "PUT", "DELETE", "PATCH"],
-                    type: Literal["pd", "glz", "local", "custom"],
+                    type: Literal["pd", "glz", "shared", "local", "custom"],
                     endpoint: EndpointURI,
                     params: dict[str, str] | None = None,
                     payload: dict[str, Any] | None = None  # pyright: ignore[reportExplicitAny]
@@ -110,7 +110,7 @@ class RiotSession:
         Returns:
             The raw httpx response.
         """
-        is_riot_endpoint: bool = type in ("pd", "glz")
+        is_riot_endpoint: bool = type in ("pd", "glz", "shared")
 
         # Rate-limit: wait out any active cooldown for riot endpoints
         if is_riot_endpoint:
@@ -268,6 +268,7 @@ class RiotSession:
                 self.region = self._get_region()
                 self._base_urls["pd"] = f"https://pd.{self.region.pd_shard}.a.pvp.net"
                 self._base_urls["glz"] = f"https://glz-{self.region.glz_shard}.{self.region.glz_region}.a.pvp.net"
+                self._base_urls["shared"] = f"https://shared.{self.region.pd_shard}.a.pvp.net"
                 break
             except RegionNotFoundError:
                 logger.debug("Region not in logs yet, retrying in 2s")
@@ -429,7 +430,7 @@ class RiotSession:
                 yield line
             
     def _create_url(self,
-        type: Literal["pd", "glz", "local", "custom"],
+        type: Literal["pd", "glz", "shared", "local", "custom"],
         endpoint: EndpointURI,
         params: dict[str, str] | None = None) -> str:
         """Creates the final request URL. For custom URL's set type to custom and put the URL as the endpoint"""
@@ -590,8 +591,8 @@ class RiotSession:
         """
         try:
             response = await self.fetch(
-                "GET", "custom",
-                EndpointURI(f"https://shared.{self.region.pd_shard}.a.pvp.net/content-service/v3/content"),
+                "GET", "shared",
+                EndpointURI("/content-service/v3/content"),
             )
             data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
             for season in data.get("Seasons", []):  # pyright: ignore[reportAny]
@@ -600,8 +601,10 @@ class RiotSession:
                     logger.debug(f"Current competitive season: {season_id}")
                     return season_id
             logger.warning("No active competitive season found in content response")
+        except httpx.HTTPStatusError as e:
+            logger.warning(f"Failed to fetch current season: {e.response.status_code} {e.response.text[:200]}")
         except Exception as e:
-            logger.warning(f"Failed to fetch current season: {e}")
+            logger.warning(f"Failed to fetch current season: {type(e).__name__}: {e}")
         return ""
 
     # ------- Local --------
