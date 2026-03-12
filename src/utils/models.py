@@ -851,6 +851,104 @@ class MatchWatermark:
     dig_visited_matches: set[str] = field(default_factory=set)
 
 
+# ------------ Pregame Models ------------
+
+
+@dataclass
+class _PregamePlayerIdentity:
+    Subject: str | None = None
+    PlayerCardID: str | None = None
+    PlayerTitleID: str | None = None
+    AccountLevel: int | None = None
+    PreferredLevelBorderID: str | None = None
+    Incognito: bool | None = None
+    HideAccountLevel: bool | None = None
+
+
+@dataclass
+class _PregameSeasonalBadge:
+    SeasonID: str | None = None
+    NumberOfWins: int | None = None
+    WinsByTier: dict[str, int] | None = None
+    Rank: int | None = None
+    LeaderboardRank: int | None = None
+
+
+@dataclass
+class _PregamePlayer:
+    Subject: str | None = None
+    CharacterID: str | None = None
+    CharacterSelectionState: str | None = None
+    PregamePlayerState: str | None = None
+    CompetitiveTier: int | None = None
+    PlayerIdentity: _PregamePlayerIdentity | dict[str, object] | None = None
+    SeasonalBadgeInfo: _PregameSeasonalBadge | dict[str, object] | None = None
+    IsCaptain: bool | None = None
+    PlatformType: str | None = None
+    PremierPrestige: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.PlayerIdentity, dict):
+            self.PlayerIdentity = _PregamePlayerIdentity(**self.PlayerIdentity)  # pyright: ignore[reportArgumentType]
+        if isinstance(self.SeasonalBadgeInfo, dict):
+            self.SeasonalBadgeInfo = _PregameSeasonalBadge(**self.SeasonalBadgeInfo)  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class _PregameTeam:
+    TeamID: str | None = None
+    Players: list[_PregamePlayer] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.Players and isinstance(self.Players[0], dict):
+            known = {f.name for f in fields(_PregamePlayer)}
+            self.Players = [_PregamePlayer(**{k: v for k, v in p.items() if k in known}) for p in self.Players]  # pyright: ignore[reportArgumentType, reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
+
+
+@dataclass
+class PregameMatchResponse:
+    """Response from GET /pregame/v1/matches/{matchId}."""
+    ID: str | None = None
+    Version: int | None = None
+    Teams: list[_PregameTeam] | list[dict[str, object]] | None = None
+    AllyTeam: _PregameTeam | dict[str, object] | None = None
+    EnemyTeam: _PregameTeam | dict[str, object] | None = None
+    ObserverSubjects: list[str] | None = None
+    MatchCoaches: list[str] | None = None
+    EnemyTeamSize: int | None = None
+    EnemyTeamLockCount: int | None = None
+    PregameState: str | None = None
+    LastUpdated: str | None = None
+    MapID: str | None = None
+    MapSelectPool: list[object] | None = None
+    BannedMapIDs: list[str] | None = None
+    CastedVotes: dict[str, object] | None = None
+    MapSelectSteps: list[object] | None = None
+    MapSelectStep: int | None = None
+    Team1: str | None = None
+    GamePodID: str | None = None
+    Mode: str | None = None
+    VoiceSessionID: str | None = None
+    MUCName: str | None = None
+    TeamMatchToken: str | None = None
+    QueueID: str | None = None
+    ProvisioningFlowID: str | None = None
+    IsRanked: bool | None = None
+    PhaseTimeRemainingNS: int | None = None
+    StepTimeRemainingNS: int | None = None
+    altModesFlagADA: bool | None = None
+    TournamentMetadata: dict[str, object] | None = None
+    RosterMetadata: dict[str, object] | None = None
+
+    def __post_init__(self) -> None:
+        if self.Teams and isinstance(self.Teams[0], dict):
+            self.Teams = [_PregameTeam(**t) for t in self.Teams]  # pyright: ignore[reportCallIssue]
+        if isinstance(self.AllyTeam, dict):
+            self.AllyTeam = _PregameTeam(**self.AllyTeam)  # pyright: ignore[reportArgumentType]
+        if isinstance(self.EnemyTeam, dict):
+            self.EnemyTeam = _PregameTeam(**self.EnemyTeam)  # pyright: ignore[reportArgumentType]
+
+
 # ------------ Game State Models ------------
 
 
