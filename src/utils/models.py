@@ -762,6 +762,52 @@ class MatchHistoryResponse:
 
 
 @dataclass
+class LeaderboardPlayer:
+    """Single player entry in the leaderboard."""
+    PlayerCardID: str | None = None
+    TitleID: str | None = None
+    IsBanned: bool | None = None
+    IsAnonymized: bool | None = None
+    puuid: str | None = None
+    gameName: str | None = None
+    tagLine: str | None = None
+    leaderboardRank: int | None = None
+    rankedRating: int | None = None
+    numberOfWins: int | None = None
+    competitiveTier: int | None = None
+
+
+@dataclass
+class TierDetail:
+    """Tier threshold and pagination info."""
+    rankedRatingThreshold: int | None = None
+    startingPage: int | None = None
+    startingIndex: int | None = None
+
+
+@dataclass
+class LeaderboardResponse:
+    """Response from GET /mmr/v1/leaderboards/affinity/{region}/queue/competitive/season/{seasonId}."""
+    Deployment: str | None = None
+    QueueID: str | None = None
+    SeasonID: str | None = None
+    Players: list[LeaderboardPlayer] | list[dict[str, object]] | None = None
+    totalPlayers: int | None = None
+    immortalStartingPage: int | None = None
+    immortalStartingIndex: int | None = None
+    topTierRRThreshold: int | None = None
+    tierDetails: dict[str, TierDetail] | dict[str, dict[str, object]] | None = None
+    startIndex: int | None = None
+    query: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.Players and isinstance(self.Players[0], dict):
+            self.Players = [LeaderboardPlayer(**p) for p in self.Players]  # pyright: ignore[reportCallIssue]
+        if self.tierDetails and isinstance(next(iter(self.tierDetails.values())), dict):
+            self.tierDetails = {k: TierDetail(**v) for k, v in self.tierDetails.items()}  # pyright: ignore[reportCallIssue]
+
+
+@dataclass
 class AccountProgress:
     """Per-account match collection progress.
 
