@@ -42,6 +42,7 @@ class Event(Enum):
     LEADERBOARD_FETCHED = "LEADERBOARD_FETCHED" # Leaderboard data has been retrieved
     PREGAME_MATCH_UPDATED = "PREGAME_MATCH_UPDATED" # Pregame match data fetched during agent select
     INGAME_MATCH_UPDATED = "INGAME_MATCH_UPDATED"   # Ingame match data fetched when match starts
+    INGAME_LOADOUTS_FETCHED = "INGAME_LOADOUTS_FETCHED" # Player loadouts fetched for active match
 
 IGNORE_EVENTS = [
     "AUTH_SUCCESS", 
@@ -54,7 +55,8 @@ IGNORE_EVENTS = [
     "MATCH_DETAIL_FETCHED",
     "LEADERBOARD_FETCHED",
     "PREGAME_MATCH_UPDATED",
-    "INGAME_MATCH_UPDATED"
+    "INGAME_MATCH_UPDATED",
+    "INGAME_LOADOUTS_FETCHED"
     ]
 
 @dataclass
