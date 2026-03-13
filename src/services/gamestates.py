@@ -1,5 +1,5 @@
 """
-Game state tracker and data collector.
+Game state tracker and data collector
 
 Monitors presence websocket events for sessionLoopState transitions,
 collects relevant data from the Riot API for each transition,
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable
 from collections.abc import Awaitable
 
@@ -30,6 +31,7 @@ from utils.models import (
     PresenceWebsocketEvent,
     SessionLoopState,
     _MatchPresenceData,  # pyright: ignore[reportPrivateUsage]
+    _PartyPresenceData,  # pyright: ignore[reportPrivateUsage]
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -37,6 +39,42 @@ logger: logging.Logger = logging.getLogger(__name__)
 # Lookup set for quick validation
 _VALID_STATES: set[str] = {s.value for s in SessionLoopState}
 _ITEM_TYPE_IDS: set[str] = {s.value for s in ItemTypes}
+
+
+@dataclass(frozen=True, slots=True)
+class _GameModeRules:
+    """Defines when the collector should proactively pause for a game mode.
+
+    Pause when max(ally, enemy) >= target - threshold.
+    Threshold is based on ~1 minute of average scoring rate so we
+    stop collecting before the match ends and other apps need the budget.
+
+    always_paused modes (custom, deathmatch) never run the collector
+    because the user can leave at any time.
+    """
+    target: int
+    threshold: int = 1
+    always_paused: bool = False
+
+# TODO: all gamemodes have a fixed time limit
+_GAME_MODE_RULES: dict[str, _GameModeRules] = {
+    "newmap":       _GameModeRules(target=13, threshold=1),   # standard rules
+    "competitive":  _GameModeRules(target=13, threshold=1),
+    "unrated":      _GameModeRules(target=13, threshold=1),
+    "swiftplay":    _GameModeRules(target=5,  threshold=1),
+    "spikerush":    _GameModeRules(target=4,  threshold=1),
+    "onefa":        _GameModeRules(target=5,  threshold=1),   # replication
+    "valaram":      _GameModeRules(target=5,  threshold=1),   # all random one site
+    "skirmish2v2":  _GameModeRules(target=10, threshold=1),
+    "ggteam":       _GameModeRules(target=12, threshold=1),   # escalation, ~0.5 lvl/min
+    "snowball":     _GameModeRules(target=50, threshold=9),   # ~9 pts/min
+    "hurm":         _GameModeRules(target=100, threshold=12), # team deathmatch, ~12 pts/min
+    "deathmatch":   _GameModeRules(target=0, always_paused=True),
+    "custom":       _GameModeRules(target=0, always_paused=True),
+    "":             _GameModeRules(target=0, always_paused=True),
+}
+
+_MENU_IDLE_TIMEOUT: float = 60.0
 
 class GamestateHandler:
     """
@@ -79,6 +117,10 @@ class GamestateHandler:
         self._xp_version: int | None = None
         self._penalties_version: int | None = None
         self._mmr_version: int | None = None
+        self._collector_paused: bool = False
+        self._active_queue_id: str | None = None
+        self._menu_idle_timer: asyncio.TimerHandle | None = None
+        self._last_activity_snapshot: dict[str, object] | None = None
         self._register()
 
     @property
@@ -114,6 +156,12 @@ class GamestateHandler:
         )
         self._match_collector.start()
         logger.info(f"Gamestate tracker ready for puuid {self._puuid}, match collector started")
+
+        # VALORANT_OPENED may have fired before the session was ready,
+        # in which case the presence poll was skipped. Start it now.
+        if self._valorant_open and self._current_state is None:
+            logger.info("Valorant already open at auth time, starting presence poll now")
+            self._presence_poll_task = asyncio.create_task(self._on_valorant_open_sequence())
 
     async def _on_valorant_open(self, data: LockfileData) -> None:  # pyright: ignore[reportUnusedParameter]
         """Valorant launched -> pause scheduler for 60s, then poll for initial gamestate.
@@ -168,6 +216,15 @@ class GamestateHandler:
                             new_state = SessionLoopState(state_str)
                             self._current_state = new_state
 
+                            # Set activity baseline from poll so menus
+                            # monitoring can detect changes from the
+                            # very first websocket event
+                            if new_state == SessionLoopState.MENUS:
+                                private = p.private
+                                if isinstance(private, PresencePrivate):
+                                    self._last_activity_snapshot = self._build_activity_snapshot(private)
+                                    logger.info("Activity snapshot baseline set from presence poll")
+
                             transition = GameStateTransition(
                                 previous=None,
                                 current=new_state,
@@ -180,8 +237,12 @@ class GamestateHandler:
 
             except asyncio.CancelledError:
                 raise
+            except httpx.HTTPStatusError as e:
+                logger.warning(
+                    f"Presence poll failed: {e.response.status_code} {e.response.text[:200]}"
+                )
             except Exception as e:
-                logger.debug(f"Presence poll attempt failed: {e}")
+                logger.warning(f"Presence poll failed: {type(e).__name__}: {e}")
 
             await asyncio.sleep(5)
 
@@ -203,8 +264,14 @@ class GamestateHandler:
 
         new_state = SessionLoopState(new_state_str)
 
-        # No change
+        # No state change, but still process presence for active monitors
         if new_state == self._current_state:
+            private = presence.private
+            if isinstance(private, PresencePrivate):
+                party = private.partyPresenceData
+                party_state = party.partyState if isinstance(party, _PartyPresenceData) else None
+                logger.info(f"Own presence update (no state change): partyState={party_state}, queueId={private.queueId}")
+                self._process_presence_for_state(private)
             return
 
         previous = self._current_state
@@ -219,15 +286,26 @@ class GamestateHandler:
 
         if previous is None:
             logger.info(f"Baseline state set: {new_state.value}")
+            # Poll lost the race, set activity snapshot from this websocket
+            # event so menus monitoring has a baseline to compare against
+            if new_state == SessionLoopState.MENUS:
+                private = presence.private
+                if isinstance(private, PresencePrivate):
+                    self._last_activity_snapshot = self._build_activity_snapshot(private)
+                    logger.info("Activity snapshot baseline set from websocket (poll lost race)")
         else:
             logger.info(f"State changed: {previous.value} -> {new_state.value}")
 
         await self._on_state_changed(transition)
 
     async def _on_valorant_close(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
-        """Valorant closed -> reset tracking state."""
+        """Valorant closed -> clear game-state tracking but keep match collector alive.
+
+        The session and match collector survive because the user is still
+        logged into the Riot Client. Only RSO_LOGOUT/SHUTDOWN kills those.
+        """
         self._valorant_open = False
-        self._reset()
+        self._clear_game_state()
 
     async def _on_rso_logout(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
         """Riot Client logged out -> reset tracking state."""
@@ -247,6 +325,8 @@ class GamestateHandler:
         """
         self._cancel_pending_task()
         self._cancel_pregame_poll()
+        self._cancel_menu_idle_timer()
+        self._active_queue_id = None
         # This makes the state queue be cleared and go to sleep
         self._scheduler.on_state_change()
 
@@ -259,51 +339,65 @@ class GamestateHandler:
                 self._pending_task = asyncio.create_task(self._on_enter_ingame(transition))
 
     async def _on_enter_menus(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
-        """Player returned to menus (e.g. match just ended).
+        """Player entered menus.
 
-        Waits for the rate limit offset to let other apps finish their
-        burst of requests, then enqueues general data checks.
+        Pauses the collector and starts the 60s idle timer.
+        The timer IS the rate-limit offset, when it fires, the
+        collector resumes in aggressive mode and general checks
+        are enqueued. Any user activity resets the timer.
         """
         if not self._session:
             return
 
-        await self._wait_ratelimit_offset()
-
-        # No state-specific requests for MENUS currently
-        self._enqueue_general_checks()
-        # This is mandatory to resume the state queue
-        self._scheduler.resume()
+        self._pause_collector(Event.COLLECTOR_PAUSED_USER_ACTIVITY)
+        self._reset_menu_idle_timer()
 
     async def _on_enter_pregame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
         """Player entered agent select.
 
         GLZ endpoints are not rate-limited, so we spawn a 1s
         polling coroutine that runs independently of the scheduler.
-        It dies on 404 (pregame ended server-side) or state change
-        (cancelled by _on_state_changed)
 
-        The general-check pipeline still runs after the offset wait.
+        The collector stays paused for the entire pregame (~80s).
+        Pregame is a highly competed window and not worth risking
+        rate limits for other apps.
         """
         if not self._session:
             return
 
+        self._pause_collector(Event.COLLECTOR_PAUSED_PREGAME)
+
         # GLZ endpoints are not rate-limited, poll independently
         self._pregame_poll_task = asyncio.create_task(self._poll_pregame_match())
 
-        await self._wait_ratelimit_offset()
-
-        self._enqueue_general_checks()
-        # This is mandatory to resume the state queue
-        self._scheduler.resume()
-
-    async def _on_enter_ingame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
+    async def _on_enter_ingame(self, transition: GameStateTransition) -> None:
         """Match started (loading screen / gameplay).
 
         GLZ ingame endpoints are not rate-limited, so we fetch the match
         data once directly and store the match ID for the duration of the
-        match. The general-check pipeline runs after the offset wait.
+        match. Score monitoring from presence data will pause/resume
+        the collector as match point approaches.
+
+        The queue ID is extracted from the transition presence to look up
+        the game mode rules for match point detection.
         """
         if not self._session:
+            return
+
+        # Determine the game mode for score monitoring
+        private = transition.presence.private if transition.presence else None
+        if isinstance(private, PresencePrivate):
+            self._active_queue_id = private.queueId
+
+        rules = _GAME_MODE_RULES.get(self._active_queue_id or "")
+
+        # Always-paused modes (custom, deathmatch): never run the collector
+        if rules and rules.always_paused:
+            self._pause_collector(Event.COLLECTOR_PAUSED_MATCH_POINT)
+            logger.info(f"Collector stays paused for always-paused mode: {self._active_queue_id}")
+            # Still fetch GLZ data (not rate-limited)
+            await self._fetch_ingame_match()
+            await self._fetch_ingame_loadouts()
             return
 
         # GLZ endpoints are not rate-limited, fetch directly
@@ -313,8 +407,7 @@ class GamestateHandler:
         await self._wait_ratelimit_offset()
 
         self._enqueue_general_checks()
-        # This is mandatory to resume the state queue
-        self._scheduler.resume()
+        self._resume_collector(Event.COLLECTOR_RESUMED_NOT_MATCH_POINT)
 
     # ------------------- Boilerplate -------------------
 
@@ -376,6 +469,120 @@ class GamestateHandler:
         # Match collector is already running (started on AUTH_SUCCESS).
         # Its self-scheduled requests interleave with these general checks.
 
+    # ------------------- Proactive Collector Pause/Resume -------------------
+
+    def _pause_collector(self, event: Event) -> None:
+        """Pause the scheduler and emit a diagnostic event."""
+        if not self._collector_paused:
+            self._collector_paused = True
+            self._scheduler.pause()
+            _ = asyncio.ensure_future(self.bus.emit(event))
+            logger.info(f"Collector paused: {event.value}")
+
+    def _resume_collector(self, event: Event) -> None:
+        """Resume the scheduler and emit a diagnostic event."""
+        if self._collector_paused:
+            self._collector_paused = False
+            self._scheduler.resume()
+            _ = asyncio.ensure_future(self.bus.emit(event))
+            logger.info(f"Collector resumed: {event.value}")
+
+    def _process_presence_for_state(self, private: PresencePrivate) -> None:
+        """Route presence updates to the appropriate monitor for the current state."""
+        if self._current_state == SessionLoopState.INGAME:
+            self._on_ingame_score_update(private)
+        elif self._current_state == SessionLoopState.MENUS:
+            self._on_menus_presence_update(private)
+
+    def _on_ingame_score_update(self, private: PresencePrivate) -> None:
+        """Check presence scores against game mode rules for match point detection."""
+        ally = private.partyOwnerMatchScoreAllyTeam
+        enemy = private.partyOwnerMatchScoreEnemyTeam
+        if ally is None or enemy is None:
+            return
+
+        rules = _GAME_MODE_RULES.get(self._active_queue_id or "")
+        if rules is None or rules.always_paused:
+            return
+
+        if self._is_near_end(ally, enemy, rules):
+            self._pause_collector(Event.COLLECTOR_PAUSED_MATCH_POINT)
+        else:
+            self._resume_collector(Event.COLLECTOR_RESUMED_NOT_MATCH_POINT)
+
+    @staticmethod
+    def _is_near_end(ally: int, enemy: int, rules: _GameModeRules) -> bool:
+        """True when either team is close enough to winning that we should stop collecting."""
+        return max(ally, enemy) >= rules.target - rules.threshold
+
+    def _on_menus_presence_update(self, private: PresencePrivate) -> None:
+        """Manage collector pause/resume in menus based on user activity.
+
+        Three rules:
+        1. User activity always resets the 60s idle timer.
+        2. While in queue (MATCHMAKING), collector stays paused.
+        3. Leaving queue counts as activity (rule 1).
+        """
+        party = private.partyPresenceData
+        in_queue = isinstance(party, _PartyPresenceData) and party.partyState == "MATCHMAKING"
+
+        if in_queue:
+            self._cancel_menu_idle_timer()
+            self._pause_collector(Event.COLLECTOR_PAUSED_USER_ACTIVITY)
+            self._last_activity_snapshot = None
+            return
+
+        snapshot = self._build_activity_snapshot(private)
+
+        if self._last_activity_snapshot is None or snapshot != self._last_activity_snapshot:
+            already_paused = self._collector_paused
+            logger.info("Menu activity detected, resetting idle timer")
+            self._pause_collector(Event.COLLECTOR_PAUSED_USER_ACTIVITY)
+            # _pause_collector is idempotent, if already paused (e.g.
+            # leaving queue), emit explicitly so the event log shows it
+            if already_paused:
+                _ = asyncio.ensure_future(self.bus.emit(Event.COLLECTOR_PAUSED_USER_ACTIVITY))
+            self._reset_menu_idle_timer()
+
+        self._last_activity_snapshot = snapshot
+
+    @staticmethod
+    def _build_activity_snapshot(private: PresencePrivate) -> dict[str, object]:
+        """Extract fields that indicate user activity in menus."""
+        party = private.partyPresenceData
+        return {
+            "queueId": private.queueId,
+            "partySize": private.partySize,
+            "partyState": party.partyState if isinstance(party, _PartyPresenceData) else None,
+            "partyId": private.partyId,
+            "queueEntryTime": party.queueEntryTime if isinstance(party, _PartyPresenceData) else None,
+            "isIdle": private.isIdle,
+        }
+
+    def _reset_menu_idle_timer(self) -> None:
+        """Cancel any existing idle timer and start a new one."""
+        self._cancel_menu_idle_timer()
+        loop = asyncio.get_running_loop()
+        self._menu_idle_timer = loop.call_later(_MENU_IDLE_TIMEOUT, self._on_menu_idle_expired)
+
+    def _cancel_menu_idle_timer(self) -> None:
+        """Cancel the menu idle timer if running."""
+        if self._menu_idle_timer is not None:
+            self._menu_idle_timer.cancel()
+            self._menu_idle_timer = None
+
+    def _on_menu_idle_expired(self) -> None:
+        """Called after 60s of no user activity in menus.
+
+        Resume the collector in aggressive mode and enqueue general
+        checks. The idle timer serves as the rate-limit offset.
+        """
+        logger.info(f"Menu idle timer fired (state={self._current_state}, paused={self._collector_paused})")
+        if self._current_state == SessionLoopState.MENUS:
+            self._scheduler.set_rate_mode("aggressive")
+            self._resume_collector(Event.COLLECTOR_RESUMED_IDLE)
+            self._enqueue_general_checks()
+
     # ------------------- Helpers -------------------
 
     def _find_own_presence(self, event: PresenceWebsocketEvent) -> Presence | None:
@@ -418,24 +625,50 @@ class GamestateHandler:
             _ = self._pregame_poll_task.cancel()
         self._pregame_poll_task = None
 
-    def _reset(self) -> None:
-        """Clear all tracking state."""
-        if self._match_collector:
-            self._match_collector.stop()
-            self._match_collector = None
+    def _clear_game_state(self) -> None:
+        """Clear game-state tracking without touching the session or match collector.
+
+        Used when Valorant closes but the Riot Client is still logged in.
+        The match collector keeps running so it can continue fetching
+        match history while the user is AFK in the Riot Client.
+        """
         if self._presence_poll_task and not self._presence_poll_task.done():
             _ = self._presence_poll_task.cancel()
             self._presence_poll_task = None
         self._cancel_pregame_poll()
-        self._scheduler.stop()
+        self._cancel_menu_idle_timer()
+        self._last_activity_snapshot = None
+        # Purge state-bound requests but keep the scheduler alive
+        self._scheduler.on_state_change()
+        # Resume immediately so the match collector's general-queue requests keep flowing
+        self._scheduler.set_rate_mode("aggressive")
+        self._collector_paused = False
+        self._scheduler.resume()
         self._cancel_pending_task()
         if self._current_state is not None:
-            logger.info("Gamestate tracker reset")
-        self._session = None
+            logger.info("Game state cleared (Valorant closed, match collector still active)")
         self._current_state = None
         self._active_match_id = None
+        self._active_queue_id = None
         self._loadout_version = None
         self._owned_item_count = None
+        self._xp_version = None
+        self._penalties_version = None
+        self._mmr_version = None
+
+    def _reset(self) -> None:
+        """Full teardown: clear everything including session and match collector.
+
+        Used on RSO_LOGOUT and SHUTDOWN when the session is no longer valid.
+        """
+        self._clear_game_state()
+        if self._match_collector:
+            self._match_collector.stop()
+            self._match_collector = None
+        self._scheduler.stop()
+        if self._session is not None:
+            logger.info("Gamestate tracker reset (session ended)")
+        self._session = None
 
 # ---------------- Helper API Wrapper Functions ----------------
 
