@@ -121,10 +121,15 @@ class RiotSession:
 
         url: str = self._create_url(type=type, endpoint=endpoint, params=params)
 
+        # Local endpoints use Basic auth from the lockfile, not the
+        # Bearer token that gets set on the client after authentication.
+        request_headers = {"Authorization": self.lockfile.auth_header} if type == "local" else None
+
         response = await self.client.request(
             method=method,
             url=url,
             json=payload,
+            headers=request_headers,
         )
 
         # Rate-limit: if 429, set cooldown and retry once after waiting
