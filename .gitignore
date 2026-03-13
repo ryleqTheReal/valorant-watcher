@@ -12,3 +12,7 @@ pregame*.json
 *.md
 *test.py
 data/
+general_*
+ingame_*
+pregame_*
+scripts/
