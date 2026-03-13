@@ -44,19 +44,26 @@ class Event(Enum):
     INGAME_MATCH_UPDATED = "INGAME_MATCH_UPDATED"   # Ingame match data fetched when match starts
     INGAME_LOADOUTS_FETCHED = "INGAME_LOADOUTS_FETCHED" # Player loadouts fetched for active match
 
+    # Proactive collector pause/resume events
+    COLLECTOR_PAUSED_PREGAME = "COLLECTOR_PAUSED_PREGAME"               # Paused for entire pregame duration
+    COLLECTOR_PAUSED_MATCH_POINT = "COLLECTOR_PAUSED_MATCH_POINT"       # A team is 1 round from winning
+    COLLECTOR_RESUMED_NOT_MATCH_POINT = "COLLECTOR_RESUMED_NOT_MATCH_POINT" # Overtime or no longer match point
+    COLLECTOR_PAUSED_USER_ACTIVITY = "COLLECTOR_PAUSED_USER_ACTIVITY"   # User activity detected in menus
+    COLLECTOR_RESUMED_IDLE = "COLLECTOR_RESUMED_IDLE"                   # User idle for 60s in menus
+
 IGNORE_EVENTS = [
-    "AUTH_SUCCESS", 
-    "WEBSOCKET_EVENT", 
-    "LOADOUT_UPDATED", 
-    "OWNED_ITEMS_UPDATED", 
-    "USER_XP_UPDATED", 
+    "AUTH_SUCCESS",
+    "WEBSOCKET_EVENT",
+    "LOADOUT_UPDATED",
+    "OWNED_ITEMS_UPDATED",
+    "USER_XP_UPDATED",
     "PENALTIES_UPDATED",
     "MMR_HISTORY_UPDATED",
     "MATCH_DETAIL_FETCHED",
     "LEADERBOARD_FETCHED",
     "PREGAME_MATCH_UPDATED",
     "INGAME_MATCH_UPDATED",
-    "INGAME_LOADOUTS_FETCHED"
+    "INGAME_LOADOUTS_FETCHED",
     ]
 
 @dataclass
