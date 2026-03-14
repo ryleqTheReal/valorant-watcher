@@ -30,6 +30,7 @@ from utils.models import (
     PresencePrivate,
     PresenceWebsocketEvent,
     SessionLoopState,
+    StorefrontResponse,
     _MatchPresenceData,  # pyright: ignore[reportPrivateUsage]
     _PartyPresenceData,  # pyright: ignore[reportPrivateUsage]
 )
@@ -823,14 +824,29 @@ class GamestateHandler:
         )
         
     async def _poll_store(self) -> None:
-        """Fetch the storefront, emit, then sleep until the offers rotate. Repeats until cancelled."""
+        """Fetch the storefront, emit, then sleep until the offers rotate. Repeats until cancelled.
+
+        The actual API call is enqueued through the scheduler so it
+        counts against the shared rate-limit budget.
+        """
         if not self._session:
             return
 
         try:
             while True:
+                future: asyncio.Future[StorefrontResponse] = asyncio.get_running_loop().create_future()
+
+                async def _fetch_store(fut: asyncio.Future[StorefrontResponse] = future) -> None:
+                    try:
+                        result = await self._session.general_get_store()  # pyright: ignore[reportOptionalMemberAccess]
+                        fut.set_result(result)
+                    except Exception as e:
+                        fut.set_exception(e)
+
+                self._scheduler.enqueue_general(_fetch_store, "store offers")
+
                 try:
-                    store = await self._session.general_get_store()
+                    store = await future
                 except Exception as e:
                     logger.warning(f"Store fetch failed: {type(e).__name__}: {e}, retrying in 60s")
                     await asyncio.sleep(60)
