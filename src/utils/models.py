@@ -452,6 +452,110 @@ class PresenceWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[Presen
         )
         return cls(opcode=wrapper.opcode, topic=wrapper.topic, data=envelope)
 
+
+# ------------ Friend Request Models ------------
+
+@dataclass
+class FriendRequest:
+    """A single pending friend request (incoming or outgoing)."""
+
+    game_name: str | None = None
+    game_tag: str | None = None
+    name: str | None = None
+    note: str | None = None
+    pid: str | None = None
+    platform: str | None = None
+    puuid: str | None = None
+    region: str | None = None
+    subscription: str | None = None  # "pending_in" or "pending_out"
+
+
+@dataclass
+class FriendRequestsResponse:
+    """Response from GET /chat/v4/friendrequests."""
+
+    requests: list[FriendRequest] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.requests and isinstance(self.requests[0], dict):
+            known = {f.name for f in fields(FriendRequest)}
+            dicts: list[dict[str, object]] = self.requests  # pyright: ignore[reportAssignmentType]
+            self.requests = [
+                FriendRequest(**{k: v for k, v in r.items() if k in known})  # pyright: ignore[reportArgumentType]
+                for r in dicts
+            ]
+
+
+@dataclass
+class FriendRequestWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[FriendRequestsResponse]]):
+    """A fully parsed WAMP friend request event.
+
+    Structure: WAMP wrapper -> event envelope -> FriendRequestsResponse -> list[FriendRequest]
+    """
+
+    @classmethod
+    def from_raw_wamp(cls, wrapper: WebsocketEventWrapper[object]) -> FriendRequestWebsocketEvent:
+        """Parse from a pre-parsed WAMP wrapper."""
+        payload: dict[str, object] = wrapper.data  # pyright: ignore[reportAssignmentType]
+        response = FriendRequestsResponse(**payload.get("data", {}))  # pyright: ignore[reportCallIssue]
+        envelope = WebsocketEventEnvelope(
+            data=response,
+            eventType=str(payload.get("eventType", "")),
+            uri=str(payload.get("uri", "")),
+        )
+        return cls(opcode=wrapper.opcode, topic=wrapper.topic, data=envelope)
+
+
+# ------------ Friend Models ------------
+
+@dataclass
+class Friend:
+    """A single friend entry from /chat/v4/friends."""
+
+    activePlatform: str | None = None
+    displayGroup: str | None = None
+    game_name: str | None = None
+    game_tag: str | None = None
+    group: str | None = None
+    last_online_ts: int | None = None
+    name: str | None = None
+    note: str | None = None
+    pid: str | None = None
+    puuid: str | None = None
+    region: str | None = None
+
+
+@dataclass
+class FriendResponse:
+    """Parsed payload from a /chat/v4/friends event."""
+
+    friends: list[Friend] | list[dict[str, object]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.friends and isinstance(self.friends[0], dict):
+            self.friends = [Friend(**f) for f in self.friends]  # pyright: ignore[reportCallIssue]
+
+
+@dataclass
+class FriendWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[FriendResponse]]):
+    """A fully parsed WAMP friend event.
+
+    Structure: WAMP wrapper -> event envelope -> FriendResponse -> list[Friend]
+    """
+
+    @classmethod
+    def from_raw_wamp(cls, wrapper: WebsocketEventWrapper[object]) -> FriendWebsocketEvent:
+        """Parse from a pre-parsed WAMP wrapper."""
+        payload: dict[str, object] = wrapper.data  # pyright: ignore[reportAssignmentType]
+        response = FriendResponse(**payload.get("data", {}))  # pyright: ignore[reportCallIssue]
+        envelope = WebsocketEventEnvelope(
+            data=response,
+            eventType=str(payload.get("eventType", "")),
+            uri=str(payload.get("uri", "")),
+        )
+        return cls(opcode=wrapper.opcode, topic=wrapper.topic, data=envelope)
+
+
 @dataclass
 class _GunLoadoutData:
     ID: str | None = None          # Weapon UUID
