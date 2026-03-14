@@ -117,6 +117,7 @@ class GamestateHandler:
         self._xp_version: int | None = None
         self._penalties_version: int | None = None
         self._mmr_version: int | None = None
+        self._store_poll_task: asyncio.Task[None] | None = None
         self._collector_paused: bool = False
         self._active_queue_id: str | None = None
         self._menu_idle_timer: asyncio.TimerHandle | None = None
@@ -156,6 +157,8 @@ class GamestateHandler:
         )
         self._match_collector.start()
         logger.info(f"Gamestate tracker ready for puuid {self._puuid}, match collector started")
+
+        self._store_poll_task = asyncio.create_task(self._poll_store())
 
         # VALORANT_OPENED may have fired before the session was ready,
         # in which case the presence poll was skipped. Start it now.
@@ -662,6 +665,9 @@ class GamestateHandler:
         Used on RSO_LOGOUT and SHUTDOWN when the session is no longer valid.
         """
         self._clear_game_state()
+        if self._store_poll_task and not self._store_poll_task.done():
+            _ = self._store_poll_task.cancel()
+            self._store_poll_task = None
         if self._match_collector:
             self._match_collector.stop()
             self._match_collector = None
@@ -815,3 +821,29 @@ class GamestateHandler:
             event=Event.MMR_HISTORY_UPDATED,
             label="user mmr version"
         )
+        
+    async def _poll_store(self) -> None:
+        """Fetch the storefront, emit, then sleep until the offers rotate. Repeats until cancelled."""
+        if not self._session:
+            return
+
+        try:
+            while True:
+                try:
+                    store = await self._session.general_get_store()
+                except Exception as e:
+                    logger.warning(f"Store fetch failed: {type(e).__name__}: {e}, retrying in 60s")
+                    await asyncio.sleep(60)
+                    continue
+
+                _ = await self.bus.emit(Event.STORE_OFFERS_UPDATED, store)
+                remaining = store.single_item_offers_remaining_seconds
+                if remaining is None or remaining <= 0:
+                    logger.warning("Store rotation timer missing or expired, retrying in 60s")
+                    await asyncio.sleep(60)
+                    continue
+
+                logger.info(f"Store offers fetched, next rotation in {remaining}s")
+                await asyncio.sleep(remaining)
+        except asyncio.CancelledError:
+            logger.info("Store poll cancelled")
