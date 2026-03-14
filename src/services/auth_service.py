@@ -41,6 +41,7 @@ from utils.models import (
     PregameMatchResponse,
     PresenceResponse,
     RegionInfo,
+    StorefrontResponse,
     ValorantApiResponse,
     VersionData
     )
@@ -531,6 +532,11 @@ class RiotSession:
         """Fetch the player's current MMR history"""
         response = await self.fetch("GET", "pd", EndpointURI(f"/mmr/v1/players/{self.puuid}"))
         return PlayerMMRResponse(**response.json())  # pyright: ignore[reportAny]
+
+    async def general_get_store(self) -> StorefrontResponse:
+        """Fetch the player's current storefront (daily offers, bundles, etc.)."""
+        response = await self.fetch("POST", "pd", EndpointURI(f"/store/v3/storefront/{self.puuid}"), payload={})
+        return StorefrontResponse(**response.json())  # pyright: ignore[reportAny]
 
     async def general_get_history(self, puuid: str, start_index: int, end_index: int) -> MatchHistoryResponse:
         """Fetch a page of match history for any player
