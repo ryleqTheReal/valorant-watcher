@@ -18,7 +18,13 @@ from typing import Any
 
 from services.event_bus import Event, EventBus
 
-from utils.models import LockfileData, PresenceWebsocketEvent
+from utils.models import (
+    LockfileData,
+    PresenceWebsocketEvent,
+    FriendRequestWebsocketEvent,
+    FriendWebsocketEvent,
+    WebsocketEventWrapper,
+)
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -28,7 +34,16 @@ RETRY_TIMER = 3
 # Operations: 5 -> subscribe, 6 -> unsubscribe
 # subscription_type: OnJsonApiEvent -> everything. All other events can be obtained
 # using the local /help endpoint
-WAMP_SUBSCRIPTION_MESSAGE = [5, "OnJsonApiEvent_chat_v4_presences"]  # Subscribes to all /chat/v4/presences events
+WAMP_SUBSCRIPTIONS = [
+    [5, "OnJsonApiEvent_chat_v4_presences"],        # /chat/v4/presences
+    [5, "OnJsonApiEvent_chat_v4_friendrequests"],   # /chat/v4/friendrequests
+    [5, "OnJsonApiEvent_chat_v4_friends"],           # /chat/v4/friends
+]
+
+# Map WAMP topic URIs to (parser, event) pairs
+_TOPIC_PRESENCE = "OnJsonApiEvent_chat_v4_presences"
+_TOPIC_FRIEND_REQUESTS = "OnJsonApiEvent_chat_v4_friendrequests"
+_TOPIC_FRIENDS = "OnJsonApiEvent_chat_v4_friends"
 
 
 @dataclass
@@ -61,8 +76,9 @@ class GameSocket:
                                               additional_headers={"Authorization": self.lockfile.auth_header
                                             }) as websocket:
                     self.websocket = websocket
-                    await websocket.send(json.dumps(WAMP_SUBSCRIPTION_MESSAGE))
-                    logger.info(f"Connected to Riot Client WebSocket on port {self.lockfile.port}")
+                    for sub in WAMP_SUBSCRIPTIONS:
+                        await websocket.send(json.dumps(sub))
+                    logger.info(f"Connected to Riot Client WebSocket on port {self.lockfile.port} ({len(WAMP_SUBSCRIPTIONS)} subscriptions)")
 
                     # Recv loop
                     while not self._cancelled.is_set():
@@ -83,16 +99,32 @@ class GameSocket:
                 await asyncio.sleep(self.retry_timer)
 
     def _handle_message(self, raw: str | bytes) -> None:
-        """Parse a WAMP message and emit events to the main loop."""
+        """Parse a WAMP message and route to the correct event based on topic."""
 
         try:
-            data: PresenceWebsocketEvent = PresenceWebsocketEvent.from_raw_string(raw=str(raw))
-        except (json.JSONDecodeError, TypeError):
+            parsed: list[object] = json.loads(str(raw))  # pyright: ignore[reportAny]
+            wrapper = WebsocketEventWrapper.from_raw(parsed)  # pyright: ignore[reportUnknownVariableType]
+        except (json.JSONDecodeError, TypeError, ValueError):
             logger.debug(f"Non-JSON websocket message: {raw[:200] if raw else raw}")
             return
 
+        topic: str = wrapper.topic
+
+        if topic == _TOPIC_PRESENCE:
+            data = PresenceWebsocketEvent.from_raw_string(raw=str(raw))
+            event = Event.WEBSOCKET_EVENT
+        elif topic == _TOPIC_FRIEND_REQUESTS:
+            data = FriendRequestWebsocketEvent.from_raw_wamp(wrapper)  # pyright: ignore[reportUnknownArgumentType]
+            event = Event.FRIEND_REQUEST_EVENT
+        elif topic == _TOPIC_FRIENDS:
+            data = FriendWebsocketEvent.from_raw_wamp(wrapper)   # pyright: ignore[reportUnknownArgumentType]
+            event = Event.FRIEND_EVENT
+        else:
+            logger.debug(f"Unhandled websocket topic: {topic}")
+            return
+
         _ = asyncio.run_coroutine_threadsafe(
-            self.bus.emit(Event.WEBSOCKET_EVENT, data),
+            self.bus.emit(event, data),
             self.main_loop,
         )
 
