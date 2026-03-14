@@ -334,6 +334,10 @@ class GamestateHandler:
         # This makes the state queue be cleared and go to sleep
         self._scheduler.on_state_change()
 
+        # First presence received -> fetch account aliases once
+        if transition.previous is None:
+            _ = asyncio.create_task(self._fetch_account_aliases())
+
         match transition.current:
             case SessionLoopState.MENUS:
                 self._pending_task = asyncio.create_task(self._on_enter_menus(transition))
@@ -772,6 +776,18 @@ class GamestateHandler:
                 if self._active_match_id != match_id:
                     logger.info("Ingame loadouts fetch aborted: match ended")
                     return
+
+    async def _fetch_account_aliases(self) -> None:
+        """Fetch the player's name/tag alias history once (local, not rate-limited)."""
+        if not self._session:
+            return
+
+        try:
+            aliases = await self._session.local_get_aliases()
+            _ = await self.bus.emit(Event.ACCOUNT_ALIASES_FETCHED, aliases)
+            logger.info(f"Account aliases fetched: {len(aliases)} alias(es)")
+        except Exception as e:
+            logger.warning(f"Failed to fetch account aliases: {type(e).__name__}: {e}")
 
     async def _check_loadout(self) -> None:
         """Checks whether the user has updated their loadout."""
