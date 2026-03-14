@@ -28,6 +28,7 @@ from utils.models import (
     AccessTokenJWT,
     AccountAlias,
     AccountXPResponse,
+    FriendRequestsResponse,
     EntitlementsTokenResponse,
     IngameLoadoutsResponse,
     LeaderboardResponse,
@@ -640,6 +641,13 @@ class RiotSession:
         known = {f.name for f in fields(AccountAlias)}
         items: list[dict[str, Any]] = data if isinstance(data, list) else [data]  # pyright: ignore[reportExplicitAny, reportUnknownVariableType]
         return [AccountAlias(**{k: v for k, v in alias.items() if k in known}) for alias in items]  # pyright: ignore[reportAny]
+
+    async def local_get_requests(self) -> FriendRequestsResponse:
+        """Fetch the player's pending friend requests (incoming and outgoing)."""
+        response = await self.fetch("GET", "local", EndpointURI("/chat/v4/friendrequests"))
+        data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
+        known = {f.name for f in fields(FriendRequestsResponse)}
+        return FriendRequestsResponse(**{k: v for k, v in data.items() if k in known})  # pyright: ignore[reportAny]
 
     # -------------- Pregame Endpoints --------------
 
