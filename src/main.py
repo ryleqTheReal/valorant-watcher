@@ -17,6 +17,7 @@ from services.auth_service import AuthHandler
 from services.gamesocket import GameSocketHandler
 from services.gamestates import GamestateHandler
 from services.config_manager import ConfigManager
+from services.hardware_service import collect_and_emit as collect_hardware
 
 from utils.file_utils import get_config_path, get_watermark_path
 
@@ -65,7 +66,7 @@ class ValorantStatsApp:
         # --- TEMP: dump match details to local JSONL for overnight testing ---
         match_dump_path = Path(__file__).resolve().parents[1] / "data" / "match_dump.jsonl"
         match_dump_path.parent.mkdir(parents=True, exist_ok=True)
-        self._match_dump_file = open(match_dump_path, "a", encoding="utf-8")  # noqa: SIM115  # pyright: ignore[reportUninitializedInstanceVariable]
+        self._match_dump_file = open(match_dump_path, "a", encoding="utf-8")  # noqa: SIM115  # pyright: ignore[reportUninitializedInstanceVariable, reportUnannotatedClassAttribute]
         self._match_count: int = 0  # pyright: ignore[reportUninitializedInstanceVariable]
 
         async def _on_match_detail(data: object) -> None:
@@ -115,6 +116,7 @@ class ValorantStatsApp:
                 # Windows does not support add_signal_handler
                 _ = signal.signal(sig, lambda s, f: shutdown_event.set())
 
+        _ = await collect_hardware(self.bus)
         _ = await self.riot_watcher.start_polling()
         _ = await self.process_watcher.start_polling()
         _ = await shutdown_event.wait()
