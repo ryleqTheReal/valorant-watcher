@@ -50,6 +50,7 @@ class Event(Enum):
     FRIEND_REQUEST_RECEIVED = "FRIEND_REQUEST_RECEIVED" # Incoming friend request via websocket
     FRIEND_REQUEST_SENT = "FRIEND_REQUEST_SENT"         # Outgoing friend request via websocket
     FRIENDS_LIST_FETCHED = "FRIENDS_LIST_FETCHED"       # Initial friend list fetched on presence baseline
+    USERINFO_FETCHED = "USERINFO_FETCHED"               # User account info fetched on presence baseline
 
     # Proactive collector pause/resume events
     COLLECTOR_PAUSED_PREGAME = "COLLECTOR_PAUSED_PREGAME"               # Paused for entire pregame duration
@@ -58,22 +59,7 @@ class Event(Enum):
     COLLECTOR_PAUSED_USER_ACTIVITY = "COLLECTOR_PAUSED_USER_ACTIVITY"   # User activity detected in menus
     COLLECTOR_RESUMED_IDLE = "COLLECTOR_RESUMED_IDLE"                   # User idle for 60s in menus
 
-IGNORE_EVENTS = [
-    "AUTH_SUCCESS",
-    "WEBSOCKET_EVENT",
-    "LOADOUT_UPDATED",
-    "OWNED_ITEMS_UPDATED",
-    "USER_XP_UPDATED",
-    "PENALTIES_UPDATED",
-    "MMR_HISTORY_UPDATED",
-    "MATCH_DETAIL_FETCHED",
-    "LEADERBOARD_FETCHED",
-    "PREGAME_MATCH_UPDATED",
-    "INGAME_MATCH_UPDATED",
-    "INGAME_LOADOUTS_FETCHED",
-    "STORE_OFFERS_UPDATED",
-    "ACCOUNT_ALIASES_FETCHED"
-    ]
+IGNORE_EVENTS = [event.value for event in Event]
 
 @dataclass
 class Listener:
