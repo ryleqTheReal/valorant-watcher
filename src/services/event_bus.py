@@ -45,6 +45,8 @@ class Event(Enum):
     INGAME_LOADOUTS_FETCHED = "INGAME_LOADOUTS_FETCHED" # Player loadouts fetched for active match
     STORE_OFFERS_UPDATED = "STORE_OFFERS_UPDATED"       # Daily skin offers have rotated
     ACCOUNT_ALIASES_FETCHED = "ACCOUNT_ALIASES_FETCHED" # Player's name/tag alias history fetched
+    FRIEND_REQUEST_EVENT = "FRIEND_REQUEST_EVENT"       # Friend request sent/received via websocket
+    FRIEND_EVENT = "FRIEND_EVENT"                       # Friend added/removed via websocket
 
     # Proactive collector pause/resume events
     COLLECTOR_PAUSED_PREGAME = "COLLECTOR_PAUSED_PREGAME"               # Paused for entire pregame duration
@@ -68,6 +70,8 @@ IGNORE_EVENTS = [
     "INGAME_LOADOUTS_FETCHED",
     "STORE_OFFERS_UPDATED",
     "ACCOUNT_ALIASES_FETCHED",
+    "FRIEND_REQUEST_EVENT",
+    "FRIEND_EVENT",
     ]
 
 @dataclass
