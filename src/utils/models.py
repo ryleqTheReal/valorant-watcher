@@ -1182,6 +1182,25 @@ class StorefrontResponse:
         return self.SkinsPanelLayout.get("SingleItemOffersRemainingDurationInSeconds")  # pyright: ignore[reportReturnType]
 
 
+@dataclass
+class AccountAlias:
+    """A single name/tag alias from the player's account history.
+
+    Attributes:
+        active: Whether this alias is the currently active one.
+        created_datetime: Epoch milliseconds when this alias was set.
+        game_name: The display name (e.g. "JudgeMainNoBrain").
+        summoner: Whether this is a summoner name (League of Legends).
+        tag_line: The tag (e.g. "Judge").
+    """
+
+    active: bool | None = None
+    created_datetime: int | None = None
+    game_name: str | None = None
+    summoner: bool | None = None
+    tag_line: str | None = None
+
+
 # ------------ Game State Models ------------
 
 
