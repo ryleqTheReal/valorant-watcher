@@ -1151,6 +1151,37 @@ class IngameLoadoutsResponse:
             self.Loadouts = [_IngameLoadoutEntry(**{k: v for k, v in entry.items() if k in known}) for entry in self.Loadouts]  # pyright: ignore[reportArgumentType, reportUnknownMemberType, reportAttributeAccessIssue, reportUnknownVariableType]
 
 
+# ------------ Storefront Models ------------
+
+
+@dataclass
+class StorefrontResponse:
+    """Response from POST /store/v3/storefront/{puuid}.
+
+    Only the daily skin offers (SkinsPanelLayout) are modelled;
+    the remaining sections are kept as raw dicts.
+    """
+    SkinsPanelLayout: dict[str, object] | None = None
+    FeaturedBundle: dict[str, object] | None = None
+    UpgradeCurrencyStore: dict[str, object] | None = None
+    AccessoryStore: dict[str, object] | None = None
+    PluginStores: list[dict[str, object]] | None = None
+
+    @property
+    def single_item_offers(self) -> list[str]:
+        """The 4 daily skin-offer item IDs."""
+        if not self.SkinsPanelLayout:
+            return []
+        return self.SkinsPanelLayout.get("SingleItemOffers", [])  # pyright: ignore[reportReturnType]
+
+    @property
+    def single_item_offers_remaining_seconds(self) -> int | None:
+        """Seconds until the daily offers rotate."""
+        if not self.SkinsPanelLayout:
+            return None
+        return self.SkinsPanelLayout.get("SingleItemOffersRemainingDurationInSeconds")  # pyright: ignore[reportReturnType]
+
+
 # ------------ Game State Models ------------
 
 
