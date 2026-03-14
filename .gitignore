@@ -15,4 +15,7 @@ data/
 general_*
 ingame_*
 pregame_*
+local_*
+websocket_*
 scripts/
+test_*
