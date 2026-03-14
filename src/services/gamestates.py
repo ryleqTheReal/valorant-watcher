@@ -238,6 +238,7 @@ class GamestateHandler:
                             logger.info(f"Initial gamestate from presence poll: {new_state.value}")
                             await self._on_state_changed(transition)
                             await self._fetch_initial_friends()
+                            await self._fetch_userinfo()
                             return
 
             except asyncio.CancelledError:
@@ -299,6 +300,7 @@ class GamestateHandler:
                     self._last_activity_snapshot = self._build_activity_snapshot(private)
                     logger.info("Activity snapshot baseline set from websocket (poll lost race)")
             await self._fetch_initial_friends()
+            await self._fetch_userinfo()
         else:
             logger.info(f"State changed: {previous.value} -> {new_state.value}")
 
@@ -850,6 +852,16 @@ class GamestateHandler:
             _ = await self.bus.emit(Event.FRIENDS_LIST_FETCHED, friends)
         except Exception:
             logger.warning("Failed to fetch initial friend list", exc_info=True)
+
+    async def _fetch_userinfo(self) -> None:
+        """Fetch the user's account info once after the first presence is received."""
+        if not self._session:
+            return
+        try:
+            userinfo = await self._session.local_get_userinfo()
+            _ = await self.bus.emit(Event.USERINFO_FETCHED, userinfo)
+        except Exception:
+            logger.warning("Failed to fetch userinfo", exc_info=True)
 
     async def _poll_store(self) -> None:
         """Fetch the storefront, emit, then sleep until the offers rotate. Repeats until cancelled.
