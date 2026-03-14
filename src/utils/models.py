@@ -186,6 +186,94 @@ class EntitlementsTokenResponse:
 
 
 @dataclass
+class _UserInfoPassword:
+    """Password metadata from the userInfo payload."""
+    cng_at: int | None = None       # Timestamp of last password change
+    reset: bool | None = None       # Whether the password was reset
+    must_reset: bool | None = None  # Whether a password reset is required
+
+
+@dataclass
+class _UserInfoBan:
+    """Ban/restriction info from the userInfo payload."""
+    restrictions: list[object] | None = None  # Active account restrictions
+
+
+@dataclass
+class _UserInfoAccount:
+    """Account details from the userInfo payload.
+
+    Note: the JSON key ``"type"`` is mapped to ``account_type`` to avoid
+    shadowing the built-in :func:`type`.
+    """
+    account_type: int | None = None   # Account type identifier (JSON key: "type")
+    state: str | None = None          # Account state, e.g. "ENABLED"
+    adm: bool | None = None           # Whether the account has admin privileges
+    game_name: str | None = None      # In-game display name
+    tag_line: str | None = None       # Riot ID tag (e.g. "Judge")
+    created_at: int | None = None     # Account creation timestamp (epoch ms)
+
+
+@dataclass
+class UserInfo:
+    """Parsed inner JSON from the userInfo field.
+
+    The raw API returns userInfo as a JSON *string*; this dataclass
+    represents the parsed contents.  All fields are optional as the
+    schema is speculative (based on a single sample).
+    """
+    sub: str | None = None                                      # Player UUID
+    country: str | None = None                                  # ISO country code (e.g. "deu")
+    email_verified: bool | None = None                          # Whether the email is verified
+    player_plocale: str | None = None                           # Player platform locale
+    country_at: int | None = None                               # Timestamp when country was set (epoch ms)
+    pw: _UserInfoPassword | dict[str, object] | None = None     # Password metadata
+    phone_number_verified: bool | None = None                   # Whether the phone number is verified
+    preferred_username: str | None = None                       # Login username
+    ban: _UserInfoBan | dict[str, object] | None = None         # Ban / restriction info
+    ppid: str | None = None                                     # Partner player ID
+    lol_region: list[str] | None = None                         # Linked League of Legends regions
+    player_locale: str | None = None                            # Player locale (e.g. "de")
+    pvpnet_account_id: str | None = None                        # Legacy PvP.net account ID
+    lol: str | None = None                                      # Legacy League of Legends data
+    original_platform_id: str | None = None                     # Original platform identifier
+    original_account_id: str | None = None                      # Original account identifier
+    acct: _UserInfoAccount | dict[str, object] | None = None    # Riot account details
+    jti: str | None = None                                      # JWT token identifier
+    username: str | None = None                                 # Riot account username
+
+    def __post_init__(self) -> None:
+        if isinstance(self.pw, dict):
+            known = {f.name for f in fields(_UserInfoPassword)}
+            self.pw = _UserInfoPassword(**{k: v for k, v in self.pw.items() if k in known})  # pyright: ignore[reportArgumentType]
+        if isinstance(self.ban, dict):
+            known = {f.name for f in fields(_UserInfoBan)}
+            self.ban = _UserInfoBan(**{k: v for k, v in self.ban.items() if k in known})  # pyright: ignore[reportArgumentType]
+        if isinstance(self.acct, dict):
+            # Remap "type" -> "account_type" to avoid shadowing the builtin
+            remapped = {("account_type" if k == "type" else k): v for k, v in self.acct.items()}
+            known = {f.name for f in fields(_UserInfoAccount)}
+            self.acct = _UserInfoAccount(**{k: v for k, v in remapped.items() if k in known})  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class UserInfoResponse:
+    """Response from GET /rso-auth/v1/authorization/userinfo.
+
+    The API returns ``{"userInfo": "<json-string>"}`` — the ``userInfo``
+    value is a JSON-encoded string, not a nested object.  ``__post_init__``
+    parses it into a :class:`UserInfo` instance.
+    """
+    userInfo: UserInfo | str | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.userInfo, str):
+            parsed: dict[str, object] = json.loads(self.userInfo)  # pyright: ignore[reportAny]
+            known = {f.name for f in fields(UserInfo)}
+            self.userInfo = UserInfo(**{k: v for k, v in parsed.items() if k in known})  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
 class _JWTPartialPayload:
     """Nested object inside the JWT payload (e.g. "pp", "dat", "plt")."""
     c: str = ""
