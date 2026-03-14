@@ -26,6 +26,7 @@ from requests import Response
 from services.event_bus import EventBus, Event
 from utils.models import (
     AccessTokenJWT,
+    AccountAlias,
     AccountXPResponse,
     EntitlementsTokenResponse,
     IngameLoadoutsResponse,
@@ -631,7 +632,15 @@ class RiotSession:
         """Fetch all known presences"""
         response = await self.fetch("GET", "local", EndpointURI("/chat/v4/presences"))
         return PresenceResponse(**response.json())  # pyright: ignore[reportAny]
-    
+
+    async def local_get_aliases(self) -> list[AccountAlias]:
+        """Fetch the player's name/tag alias history."""
+        response = await self.fetch("GET", "local", EndpointURI("/player-account/aliases/v1/active"))
+        data = response.json()  # pyright: ignore[reportAny]
+        known = {f.name for f in fields(AccountAlias)}
+        items: list[dict[str, Any]] = data if isinstance(data, list) else [data]  # pyright: ignore[reportExplicitAny, reportUnknownVariableType]
+        return [AccountAlias(**{k: v for k, v in alias.items() if k in known}) for alias in items]  # pyright: ignore[reportAny]
+
     # -------------- Pregame Endpoints --------------
 
     async def pregame_get_player(self) -> str:
