@@ -51,6 +51,7 @@ class Event(Enum):
     FRIEND_REQUEST_SENT = "FRIEND_REQUEST_SENT"         # Outgoing friend request via websocket
     FRIENDS_LIST_FETCHED = "FRIENDS_LIST_FETCHED"       # Initial friend list fetched on presence baseline
     USERINFO_FETCHED = "USERINFO_FETCHED"               # User account info fetched on presence baseline
+    HARDWARE_COLLECTED = "HARDWARE_COLLECTED"           # Hardware specs collected on startup
 
     # Proactive collector pause/resume events
     COLLECTOR_PAUSED_PREGAME = "COLLECTOR_PAUSED_PREGAME"               # Paused for entire pregame duration
