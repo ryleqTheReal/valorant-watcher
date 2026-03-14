@@ -31,6 +31,7 @@ from utils.models import (
     FriendRequestsResponse,
     FriendResponse,
     EntitlementsTokenResponse,
+    UserInfoResponse,
     IngameLoadoutsResponse,
     LeaderboardResponse,
     LockfileData,
@@ -649,6 +650,11 @@ class RiotSession:
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
         known = {f.name for f in fields(FriendResponse)}
         return FriendResponse(**{k: v for k, v in data.items() if k in known})  # pyright: ignore[reportAny]
+
+    async def local_get_userinfo(self) -> UserInfoResponse:
+        """Fetch the authenticated user's account info (game name, tag, country, etc.)."""
+        response = await self.fetch("GET", "local", EndpointURI("/rso-auth/v1/authorization/userinfo"))
+        return UserInfoResponse(**response.json())  # pyright: ignore[reportAny]
 
     async def local_get_requests(self) -> FriendRequestsResponse:
         """Fetch the player's pending friend requests (incoming and outgoing)."""
