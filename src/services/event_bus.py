@@ -43,6 +43,7 @@ class Event(Enum):
     PREGAME_MATCH_UPDATED = "PREGAME_MATCH_UPDATED" # Pregame match data fetched during agent select
     INGAME_MATCH_UPDATED = "INGAME_MATCH_UPDATED"   # Ingame match data fetched when match starts
     INGAME_LOADOUTS_FETCHED = "INGAME_LOADOUTS_FETCHED" # Player loadouts fetched for active match
+    STORE_OFFERS_UPDATED = "STORE_OFFERS_UPDATED"       # Daily skin offers have rotated
 
     # Proactive collector pause/resume events
     COLLECTOR_PAUSED_PREGAME = "COLLECTOR_PAUSED_PREGAME"               # Paused for entire pregame duration
@@ -64,6 +65,7 @@ IGNORE_EVENTS = [
     "PREGAME_MATCH_UPDATED",
     "INGAME_MATCH_UPDATED",
     "INGAME_LOADOUTS_FETCHED",
+    "STORE_OFFERS_UPDATED",
     ]
 
 @dataclass
