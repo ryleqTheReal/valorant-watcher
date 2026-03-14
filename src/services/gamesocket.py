@@ -115,10 +115,18 @@ class GameSocket:
             event = Event.WEBSOCKET_EVENT
         elif topic == _TOPIC_FRIEND_REQUESTS:
             data = FriendRequestWebsocketEvent.from_raw_wamp(wrapper)  # pyright: ignore[reportUnknownArgumentType]
-            event = Event.FRIEND_REQUEST_EVENT
+            # Distinguish incoming vs outgoing by subscription field
+            requests = data.data.data.requests if data.data and data.data.data else None
+            if requests and hasattr(requests[0], "subscription"):
+                sub = requests[0].subscription   # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportAttributeAccessIssue]
+                event = Event.FRIEND_REQUEST_RECEIVED if sub == "pending_in" else Event.FRIEND_REQUEST_SENT
+            else:
+                event = Event.FRIEND_REQUEST_RECEIVED
         elif topic == _TOPIC_FRIENDS:
             data = FriendWebsocketEvent.from_raw_wamp(wrapper)   # pyright: ignore[reportUnknownArgumentType]
-            event = Event.FRIEND_EVENT
+            # Distinguish add vs remove by eventType
+            event_type = data.data.eventType if data.data else ""
+            event = Event.FRIEND_REMOVED if event_type == "Delete" else Event.FRIEND_ADDED
         else:
             logger.debug(f"Unhandled websocket topic: {topic}")
             return
