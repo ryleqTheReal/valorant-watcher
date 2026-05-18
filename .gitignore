@@ -19,3 +19,5 @@ local_*
 websocket_*
 scripts/
 test_*
+old_data/
+swagger.json

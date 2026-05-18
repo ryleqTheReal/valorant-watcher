@@ -77,3 +77,9 @@ def get_watermark_path() -> Path:
     """Return the path to the local match watermark file.
        Stored next to config.json in the project root: data/match_watermarks.json"""
     return Path(__file__).resolve().parents[2] / "data" / "match_watermarks.json"
+
+
+@cache
+def get_auth_tokens_path() -> Path:
+    """Return the path to the persisted backend auth tokens (data/auth.json)."""
+    return Path(__file__).resolve().parents[2] / "data" / "auth.json"

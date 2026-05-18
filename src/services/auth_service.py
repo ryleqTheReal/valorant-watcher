@@ -473,7 +473,8 @@ class RiotSession:
         for line in cls._read_lines(log_path):
             if match := re.search(r"CI server version:\s*(.+)", line):
                 parts = match.group(1).strip().split("-")
-                _ = parts.insert(2, "shipping")
+                if "shipping" not in parts:
+                    _ = parts.insert(2, "shipping") 
                 version = "-".join(parts)
                 logger.info(f"Got version from logs: {version}")
                 return version
@@ -501,7 +502,7 @@ class RiotSession:
             raise FallbackApiError(message=f"Fallback API request failed: {e}") from e
         except Exception as e:
             raise VersionNotFoundError() from e
-
+        
     # ------------------- API Wrappers -------------------
     
     # I have come up with the following naming scheme:
@@ -751,7 +752,13 @@ class AuthHandler:
     # IMPORTANT: Make sure that each handler function allows for a data parameter even if it's not used IMPORTANT
 
     async def _on_rso_login(self, data: LockfileData) -> None:
-        """Riot Client logged in -> authenticate"""
+        """Riot Client logged in -> authenticate, then fetch userinfo
+
+        local_get_userinfo is available as soon as the Riot Client is
+        running and the user is logged in (it does not require Valorant
+        to be launched), so we fire USERINFO_FETCHED right after
+        AUTH_SUCCESS instead of waiting for the presence baseline.
+        """
 
         logger.info(f"Authenticating against {data.base_url} ...")
 
@@ -761,6 +768,12 @@ class AuthHandler:
 
             logger.info("Auth successful")
             _ = await self.bus.emit(Event.AUTH_SUCCESS, {"session": self.session})
+
+            try:
+                userinfo = await self.session.local_get_userinfo()
+                _ = await self.bus.emit(Event.USERINFO_FETCHED, userinfo)
+            except Exception:
+                logger.warning("Failed to fetch userinfo after auth", exc_info=True)
 
         except Exception as e:
             logger.error(f"Auth failed: {e}")

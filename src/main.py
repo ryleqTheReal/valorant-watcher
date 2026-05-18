@@ -14,6 +14,7 @@ from pathlib import Path
 from services.event_bus import EventBus, Event
 from services.launch_observer import RiotClientWatcher, ProcessWatcher
 from services.auth_service import AuthHandler
+from services.backend_service import BackendCommunicationService
 from services.gamesocket import GameSocketHandler
 from services.gamestates import GamestateHandler
 from services.config_manager import ConfigManager
@@ -58,6 +59,13 @@ class ValorantStatsApp:
             initial_limit=self.cfg.config.ratelimit_initial_limit,
             sustained_limit=self.cfg.config.ratelimit_sustained_limit,
             aggressive_limit=self.cfg.config.ratelimit_aggressive_limit,
+        )
+        server_base_url = self.cfg.config.server_base_url
+        if not server_base_url:
+            raise RuntimeError("config.json is missing 'server_base_url'; backend auth cannot run.")
+        self.backend: BackendCommunicationService = BackendCommunicationService(
+            self.bus,
+            server_base_url=server_base_url,
         )
 
     async def run(self) -> None:

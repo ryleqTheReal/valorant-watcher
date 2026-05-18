@@ -1358,6 +1358,7 @@ class StorefrontResponse:
     UpgradeCurrencyStore: dict[str, object] | None = None
     AccessoryStore: dict[str, object] | None = None
     PluginStores: list[dict[str, object]] | None = None
+    BonusStore: list[dict[str, object]] | None = None
 
     @property
     def single_item_offers(self) -> list[str]:

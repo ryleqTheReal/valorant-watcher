@@ -12,6 +12,7 @@ FALLBACK_API_ERROR = "FALLBACK_API_ERROR"
 API_RUNTIME_ERROR = "API_RUNTIME_ERROR"
 INCORRECT_PAGINATION_ERROR = "INCORRECT_PAGINATION_ERROR"
 LEADERBOARD_FALLBACK_ERROR = "LEADERBOARD_FALLBACK_ERROR"
+BACKEND_AUTHENTICATION_ERROR = "BACKEND_AUTHENTICATION_ERROR"
 
 class AppError(Exception):
     """Highest exception in hierarchy from which all other exceptions stem     
@@ -25,7 +26,19 @@ class AppError(Exception):
         self.message: str = "Something went horribly wrong and the app crashed"
         self.internal_status: str = CRITICAL_APP_ERROR
         
+        
+# ------------ Backend Authentication Errors ------------
     
+class BackendAuthError(AppError):
+    """Wraps a non-200 response from the backend along with its error_code."""
+    def __init__(self, *args: object, status_code: int | None = None, error_code: str | None = None, message: str = "Something went wrong when trying to authenticate with backend") -> None:
+        super().__init__(*args)
+        self.is_critical: bool = False
+        self.message: str = message
+        self.internal_status: str = BACKEND_AUTHENTICATION_ERROR
+        self.status_code: int | None = status_code
+        self.error_code: str | None = error_code
+        
 # ------------ Structure Verification Errors ------------
 
 class StructureValidationError(AppError):

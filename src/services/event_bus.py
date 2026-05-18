@@ -50,7 +50,7 @@ class Event(Enum):
     FRIEND_REQUEST_RECEIVED = "FRIEND_REQUEST_RECEIVED" # Incoming friend request via websocket
     FRIEND_REQUEST_SENT = "FRIEND_REQUEST_SENT"         # Outgoing friend request via websocket
     FRIENDS_LIST_FETCHED = "FRIENDS_LIST_FETCHED"       # Initial friend list fetched on presence baseline
-    USERINFO_FETCHED = "USERINFO_FETCHED"               # User account info fetched on presence baseline
+    USERINFO_FETCHED = "USERINFO_FETCHED"               # User account info fetched right after AUTH_SUCCESS
     HARDWARE_COLLECTED = "HARDWARE_COLLECTED"           # Hardware specs collected on startup
 
     # Proactive collector pause/resume events
