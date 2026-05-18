@@ -129,6 +129,14 @@ class GamestateHandler:
     def _puuid(self) -> str | None:
         return self._session.puuid if self._session else None
 
+    @property
+    def scheduler(self) -> RequestScheduler:
+        """The shared request scheduler. Exposed so other services
+        (e.g. SubmissionService) can enqueue task-priority Riot fetches
+        without standing up a second scheduler.
+        """
+        return self._scheduler
+
     def _register(self) -> None:
         """Subscribe to relevant events."""
         _ = self.bus.on(Event.AUTH_SUCCESS, self._on_auth_success, priority=5)

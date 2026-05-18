@@ -38,7 +38,8 @@ class Event(Enum):
     USER_XP_UPDATED = "USER_XP_UPDATED"         # The user's XP has been updated
     PENALTIES_UPDATED = "PENALTIES_UPDATED"     # Emitted when the user's penalties updated
     MMR_HISTORY_UPDATED = "MMR_HISTORY_UPDATED" # The player's MMR history has updated
-    MATCH_DETAIL_FETCHED = "MATCH_DETAIL_FETCHED" # A match's full details have been fetched
+    MATCH_DETAIL_FETCHED = "MATCH_DETAIL_FETCHED" # A match's full details have been fetched (MatchDetailEvent payload)
+    MATCH_HISTORY_FETCHED = "MATCH_HISTORY_FETCHED" # A player's match history page has been fetched (MatchHistoryEvent payload)
     LEADERBOARD_FETCHED = "LEADERBOARD_FETCHED" # Leaderboard data has been retrieved
     PREGAME_MATCH_UPDATED = "PREGAME_MATCH_UPDATED" # Pregame match data fetched during agent select
     INGAME_MATCH_UPDATED = "INGAME_MATCH_UPDATED"   # Ingame match data fetched when match starts

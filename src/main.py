@@ -6,7 +6,6 @@ then runs in the background until SIGINT/SIGTERM.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import signal
 from pathlib import Path
@@ -17,6 +16,7 @@ from services.auth_service import AuthHandler
 from services.backend_service import BackendCommunicationService
 from services.gamesocket import GameSocketHandler
 from services.gamestates import GamestateHandler
+from services.submission_service import SubmissionService
 from services.config_manager import ConfigManager
 from services.hardware_service import collect_and_emit as collect_hardware
 
@@ -67,25 +67,14 @@ class ValorantStatsApp:
             self.bus,
             server_base_url=server_base_url,
         )
+        self.submission: SubmissionService = SubmissionService(
+            self.bus,
+            self.backend,
+            self.gamestates.scheduler,
+        )
 
     async def run(self) -> None:
         """Start the app and block until a shutdown signal is received."""
-
-        # --- TEMP: dump match details to local JSONL for overnight testing ---
-        match_dump_path = Path(__file__).resolve().parents[1] / "data" / "match_dump.jsonl"
-        match_dump_path.parent.mkdir(parents=True, exist_ok=True)
-        self._match_dump_file = open(match_dump_path, "a", encoding="utf-8")  # noqa: SIM115  # pyright: ignore[reportUninitializedInstanceVariable, reportUnannotatedClassAttribute]
-        self._match_count: int = 0  # pyright: ignore[reportUninitializedInstanceVariable]
-
-        async def _on_match_detail(data: object) -> None:
-            self._match_count += 1
-            _ = self._match_dump_file.write(json.dumps(data, separators=(",", ":")) + "\n")
-            self._match_dump_file.flush()
-            if self._match_count % 10 == 0:
-                logger.info(f"[DUMP] {self._match_count} matches saved to {match_dump_path.name}")
-
-        _ = self.bus.on(Event.MATCH_DETAIL_FETCHED, _on_match_detail, priority=0)
-        # --- END TEMP ---
 
         # --- TEMP: log pregame version changes ---
         async def _on_pregame_update(data: object) -> None:
@@ -107,7 +96,6 @@ class ValorantStatsApp:
 
         logger.info("=" * 60)
         logger.info("  Valorant Stats Collector started")
-        logger.info(f"  Match dump: {match_dump_path}")
         logger.info("=" * 60)
 
         shutdown_event = asyncio.Event()
@@ -133,11 +121,6 @@ class ValorantStatsApp:
         _ = await self.bus.emit(Event.SHUTDOWN)
         _ = await self.riot_watcher.stop_polling()
         _ = await self.process_watcher.stop_polling()
-
-        # --- TEMP: close dump file ---
-        self._match_dump_file.close()
-        logger.info(f"[DUMP] Total: {self._match_count} matches saved")
-        # --- END TEMP ---
 
         logger.info("App terminated.")
 

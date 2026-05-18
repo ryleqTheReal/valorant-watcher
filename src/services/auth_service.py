@@ -97,7 +97,9 @@ class RiotSession:
                     type: Literal["pd", "glz", "shared", "local", "custom"],
                     endpoint: EndpointURI,
                     params: dict[str, str] | None = None,
-                    payload: dict[str, Any] | None = None  # pyright: ignore[reportExplicitAny]
+                    payload: dict[str, Any] | None = None,  # pyright: ignore[reportExplicitAny]
+                    shard: str | None = None,
+                    raise_on_error: bool = True,
                     ) -> httpx.Response:
         """Send an authenticated request to a Riot API endpoint.
 
@@ -111,9 +113,19 @@ class RiotSession:
             endpoint: The API endpoint path.
             params: Optional query string parameters.
             payload: Optional JSON body for POST/PUT/PATCH requests.
+            shard: Optional regional shard override. For pd/shared endpoints,
+                replaces the shard component of the base URL so requests
+                can target a different region (e.g. server-driven tasks
+                that point to another player's shard). Ignored for
+                local/custom; for glz, replaces the glz_shard slot only
+                (glz_region stays as configured for the session).
+            raise_on_error: When True, raise httpx.HTTPStatusError on
+                non-2xx responses. When False, return the response as-is
+                so the caller can inspect status_code.
 
         Raises:
-            httpx.HTTPStatusError: If the response status code indicates an error.
+            httpx.HTTPStatusError: If `raise_on_error` is True and the
+                response status code indicates an error.
 
         Returns:
             The raw httpx response.
@@ -124,7 +136,7 @@ class RiotSession:
         if is_riot_endpoint:
             await self._wait_for_rate_limit()
 
-        url: str = self._create_url(type=type, endpoint=endpoint, params=params)
+        url: str = self._create_url(type=type, endpoint=endpoint, params=params, shard=shard)
 
         # Local endpoints use Basic auth from the lockfile, not the
         # Bearer token that gets set on the client after authentication.
@@ -160,7 +172,8 @@ class RiotSession:
                 json=payload,
             )
 
-        _ = response.raise_for_status()
+        if raise_on_error:
+            _ = response.raise_for_status()
         return response
 
     def _set_rate_limit_cooldown(self) -> None:
@@ -445,17 +458,32 @@ class RiotSession:
     def _create_url(self,
         type: Literal["pd", "glz", "shared", "local", "custom"],
         endpoint: EndpointURI,
-        params: dict[str, str] | None = None) -> str:
-        """Creates the final request URL. For custom URL's set type to custom and put the URL as the endpoint"""
-        
-        base: str = self._base_urls.get(type, "")
+        params: dict[str, str] | None = None,
+        shard: str | None = None) -> str:
+        """Creates the final request URL.
+
+        For custom URL's set type to custom and put the URL as the endpoint.
+
+        When `shard` is provided, rebuilds the base for pd/shared/glz to
+        target a different region than the session's home shard. pd and
+        shared swap their shard slot. glz swaps the glz_shard slot only,
+        keeping the session's glz_region.
+        """
+
+        if shard is not None and type in ("pd", "shared"):
+            base = f"https://{type}.{shard}.a.pvp.net"
+        elif shard is not None and type == "glz":
+            base = f"https://glz-{shard}.{self.region.glz_region}.a.pvp.net"
+        else:
+            base = self._base_urls.get(type, "")
 
         url = f"{base}{endpoint.uri}"
 
         if params:
             url = f"{url}?{urlencode(params)}"
 
-        return url            
+        return url
+
 
     @classmethod
     def _get_version(cls) -> str:
@@ -577,10 +605,70 @@ class RiotSession:
         
         return MatchHistoryResponse(**response.json())  # pyright: ignore[reportAny]
 
-    async def general_get_details(self, match_id: str) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
-        """Fetch full match details. Returns raw dict (structure too complex to fully type)."""
-        response = await self.fetch("GET", "pd", EndpointURI(f"/match-details/v1/matches/{match_id}"))
+    async def general_get_details(self, match_id: str, shard: str | None = None) -> dict[str, Any]:  # pyright: ignore[reportExplicitAny]
+        """Fetch full match details. Returns raw dict (structure too complex to fully type).
+
+        Pass `shard` to target a region other than the session's home shard
+        (e.g. a server-issued task pointing at another player's region).
+        """
+        response = await self.fetch(
+            "GET", "pd",
+            EndpointURI(f"/match-details/v1/matches/{match_id}"),
+            shard=shard,
+        )
         return response.json()   # pyright: ignore[reportAny]
+
+    async def general_get_details_raw(self, match_id: str, shard: str | None = None) -> tuple[dict[str, Any] | None, int]:  # pyright: ignore[reportExplicitAny]
+        """Fetch match details without raising on HTTP errors.
+
+        Returns:
+            (payload, riot_status) — payload is None when riot_status != 200.
+        """
+        response = await self.fetch(
+            "GET", "pd",
+            EndpointURI(f"/match-details/v1/matches/{match_id}"),
+            shard=shard,
+            raise_on_error=False,
+        )
+        if response.status_code != 200:
+            return None, response.status_code
+        try:
+            return response.json(), response.status_code  # pyright: ignore[reportAny]
+        except ValueError:
+            return None, response.status_code
+
+    async def general_get_history_raw(
+        self,
+        puuid: str,
+        start_index: int = 0,
+        end_index: int = 20,
+        shard: str | None = None,
+    ) -> tuple[MatchHistoryResponse | None, dict[str, Any] | None, int]:  # pyright: ignore[reportExplicitAny]
+        """Fetch a page of match history without raising on HTTP errors.
+
+        Returns:
+            (parsed, raw_dict, riot_status). Both data values are None
+            when riot_status != 200. Used by the submission flow which
+            needs the raw json plus the exact Riot status code.
+        """
+        total: int = end_index - start_index
+        if total <= 0 or total > 20:
+            raise IncorrectPaginationError(f"Invalid page range: {total}")
+
+        response = await self.fetch(
+            "GET", "pd",
+            EndpointURI(f"/match-history/v1/history/{puuid}"),
+            params={"startIndex": str(start_index), "endIndex": str(end_index)},
+            shard=shard,
+            raise_on_error=False,
+        )
+        if response.status_code != 200:
+            return None, None, response.status_code
+        try:
+            raw: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
+        except ValueError:
+            return None, None, response.status_code
+        return MatchHistoryResponse(**raw), raw, response.status_code  # pyright: ignore[reportAny]
     
     async def general_get_leaderboard(self, start_index: int = 0, size: int = 510, query: str | None = None) -> LeaderboardResponse:
         """Fetch the region's competitive leaderboard

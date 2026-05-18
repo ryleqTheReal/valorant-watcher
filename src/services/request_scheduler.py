@@ -188,6 +188,7 @@ class RequestScheduler:
         aggressive_limit: int = 24,
     ) -> None:
         self._state_queue: deque[QueuedRequest] = deque()
+        self._task_queue: deque[QueuedRequest] = deque()
         self._general_queue: deque[QueuedRequest] = deque()
 
         # Controls whether the worker is allowed to process requests
@@ -221,6 +222,10 @@ class RequestScheduler:
     def general_queue_size(self) -> int:
         return len(self._general_queue)
 
+    @property
+    def task_queue_size(self) -> int:
+        return len(self._task_queue)
+
     def start(self, aggressive: bool = False) -> None:
         """Start the worker loop, no-op if already running
 
@@ -248,6 +253,7 @@ class RequestScheduler:
         self._worker_task = None
         self._cancel_current()
         self._state_queue.clear()
+        self._task_queue.clear()
         self._general_queue.clear()
         logger.info("Request scheduler stopped")
 
@@ -287,6 +293,16 @@ class RequestScheduler:
         logger.debug(f"Enqueued state request: {label}")
         self._wake()
 
+    def enqueue_task(
+        self,
+        execute: Callable[[], Awaitable[Any]],  # pyright: ignore[reportExplicitAny]
+        label: str = "",
+    ) -> None:
+        """Add a server-task request (mid priority, pre-empts general, survives state changes)."""
+        self._task_queue.append(QueuedRequest(execute=execute, label=label))
+        logger.debug(f"Enqueued task request: {label}")
+        self._wake()
+
     def enqueue_general(
         self,
         execute: Callable[[], Awaitable[Any]],  # pyright: ignore[reportExplicitAny]
@@ -317,6 +333,8 @@ class RequestScheduler:
         """
         if self._state_queue:
             return self._state_queue.popleft(), True
+        if self._task_queue:
+            return self._task_queue.popleft(), False
         if self._general_queue:
             return self._general_queue.popleft(), False
         return None

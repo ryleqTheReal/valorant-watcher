@@ -46,7 +46,7 @@ from services.auth_service import RiotSession
 from services.event_bus import EventBus, Event
 from services.request_scheduler import RequestScheduler
 from utils.exceptions import IncorrectPaginationError, LeaderboardFallbackError
-from utils.models import AccountProgress, LeaderboardResponse, MatchHistoryEntry, MatchHistoryResponse, MatchWatermark
+from utils.models import AccountProgress, LeaderboardResponse, MatchDetailEvent, MatchHistoryEntry, MatchHistoryResponse, MatchWatermark
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -359,7 +359,12 @@ class MatchCollector:
 
         try:
             response: dict[str, Any] = await self._session.general_get_details(match_id)  # pyright: ignore[reportExplicitAny]
-            _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, response)
+            _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
+                shard=self._session.region.pd_shard,
+                match_id=match_id,
+                riot_status=200,
+                match_details=response,
+            ))
 
             # Harvest player PUUIDs into the unvisited pool for dig phase
             self._harvest_players(response)
@@ -516,7 +521,12 @@ class MatchCollector:
 
         try:
             response: dict[str, Any] = await self._session.general_get_details(match_id)  # pyright: ignore[reportExplicitAny]
-            _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, response)
+            _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
+                shard=self._session.region.pd_shard,
+                match_id=match_id,
+                riot_status=200,
+                match_details=response,
+            ))
 
             # Mark match as visited in the DFS graph
             self._watermark.dig_visited_matches.add(match_id)

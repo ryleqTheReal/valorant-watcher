@@ -83,3 +83,15 @@ def get_watermark_path() -> Path:
 def get_auth_tokens_path() -> Path:
     """Return the path to the persisted backend auth tokens (data/auth.json)."""
     return Path(__file__).resolve().parents[2] / "data" / "auth.json"
+
+
+@cache
+def get_pending_matches_path() -> Path:
+    """JSONL spillover for match-detail submissions that the backend hasn't acked yet."""
+    return Path(__file__).resolve().parents[2] / "data" / "pending" / "matches.jsonl"
+
+
+@cache
+def get_pending_histories_path() -> Path:
+    """JSONL spillover for match-history submissions that the backend hasn't acked yet."""
+    return Path(__file__).resolve().parents[2] / "data" / "pending" / "histories.jsonl"
