@@ -32,7 +32,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +41,10 @@ import httpx
 from services.auth_service import RiotSession
 from services.backend_service import BackendCommunicationService
 from services.event_bus import Event, EventBus
+from services.gamestates import GamestateHandler
 from services.request_scheduler import RequestScheduler
 from utils.file_utils import get_pending_histories_path, get_pending_matches_path
-from utils.models import MatchDetailEvent, MatchHistoryEvent
+from utils.models import AccountXPResponse, IngameLoadoutsEvent, MatchDetailEvent, MatchHistoryEvent, OwnedItemsResponse, PenaltiesResponse
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -115,6 +116,10 @@ class SubmissionService:
         _ = self._bus.on(Event.SHUTDOWN, self._on_shutdown, priority=0)
         _ = self._bus.on(Event.MATCH_DETAIL_FETCHED, self._on_match_detail, priority=0)
         _ = self._bus.on(Event.MATCH_HISTORY_FETCHED, self._on_match_history, priority=0)
+        _ = self._bus.on(Event.USER_XP_UPDATED, self._on_user_xp_updated, priority=0)
+        _ = self._bus.on(Event.OWNED_ITEMS_UPDATED, self._on_owned_items_updated, priority=0)
+        _ = self._bus.on(Event.INGAME_LOADOUTS_FETCHED, self._on_ingame_loadouts_fetched, priority=0)
+        _ = self._bus.on(Event.PENALTIES_UPDATED, self._on_penalties_updated, priority=0)
 
     # ------------------- Event handlers -------------------
 
@@ -136,6 +141,12 @@ class SubmissionService:
         await self._client.aclose()
 
     async def _on_match_detail(self, ev: MatchDetailEvent) -> None:
+        # riot_status == 0 is an internal transport-failure sentinel; the
+        # backend's schema rejects it. Drop silently — the task will be
+        # re-issued on the next /v1/tasks poll.
+        if ev.riot_status == 0:
+            logger.debug(f"Dropping match-detail {ev.match_id[:8]} with sentinel riot_status=0")
+            return
         item: dict[str, Any] = {
             "match_id": ev.match_id,
             "shard": ev.shard,
@@ -150,6 +161,9 @@ class SubmissionService:
             _ = asyncio.create_task(self._flush_matches())
 
     async def _on_match_history(self, ev: MatchHistoryEvent) -> None:
+        if ev.riot_status == 0:
+            logger.debug(f"Dropping match-history {ev.puuid[:8]} with sentinel riot_status=0")
+            return
         item: dict[str, Any] = {
             "puuid": ev.puuid,
             "shard": ev.shard,
@@ -164,6 +178,102 @@ class SubmissionService:
         if should_flush:
             _ = asyncio.create_task(self._flush_histories())
 
+    async def _on_user_xp_updated(self, data: AccountXPResponse) -> None:
+        # Fire-and-forget: the server keeps only the latest snapshot per puuid,
+        # so a missed intermediate update is recovered by the next successful
+        # submission (which yields a single larger delta). No disk spill needed.
+        headers = self._backend.game_headers
+        if headers is None:
+            logger.info("XP update received but backend game token unavailable; skipping")
+            return
+        body: dict[str, Any] = asdict(data)  # pyright: ignore[reportExplicitAny]
+        try:
+            response = await self._client.post(
+                f"{self._backend.base_url}/v1/account/xp",
+                json=body,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            logger.warning(f"POST /v1/account/xp transport error: {e}")
+            return
+        if response.status_code in (202, 204):
+            logger.info(f"Submitted XP snapshot (HTTP {response.status_code})")
+            return
+        logger.warning(
+            f"POST /v1/account/xp -> HTTP {response.status_code} body={response.text[:200]!r}"
+        )
+
+    async def _on_penalties_updated(self, data: PenaltiesResponse) -> None:
+        headers = self._backend.game_headers
+        if headers is None:
+            logger.info("Penalties update received but backend game token unavailable; skipping")
+            return
+        body: dict[str, Any] = asdict(data)  # pyright: ignore[reportExplicitAny]
+        try:
+            response = await self._client.post(
+                f"{self._backend.base_url}/v1/account/penalties",
+                json=body,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            logger.warning(f"POST /v1/account/penalties transport error: {e}")
+            return
+        if response.status_code in (202, 204):
+            logger.info(f"Submitted penalties snapshot (HTTP {response.status_code})")
+            return
+        logger.warning(
+            f"POST /v1/account/penalties -> HTTP {response.status_code} body={response.text[:200]!r}"
+        )   
+
+    async def _on_owned_items_updated(self, data: OwnedItemsResponse) -> None:
+        headers = self._backend.game_headers
+        if headers is None:
+            logger.info("Owned items received but backend game token unavailable; skipping")
+            return
+        
+        body: dict[str, Any] = asdict(data)  # pyright: ignore[reportExplicitAny]
+        
+        try:
+            response = await self._client.post(
+                f"{self._backend.base_url}/v1/account/owned-items",
+                json=body,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            logger.warning(f"POST /v1/account/owned-items transport error: {e}")
+            return
+        if response.status_code in (202, 204):
+            logger.info(f"Submitted owned items snapshot (HTTP {response.status_code})")
+            return
+        logger.warning(
+            f"POST /v1/account/owned-items -> HTTP {response.status_code} body={response.text[:200]!r}"
+        )
+        
+        
+    async def _on_ingame_loadouts_fetched(self, data: IngameLoadoutsEvent) -> None:
+        headers = self._backend.game_headers
+        if headers is None:
+            logger.info("Ingame loadouts received but backend game token unavailable; skipping")
+            return
+
+        body: dict[str, Any] = asdict(data.loadouts)  # pyright: ignore[reportExplicitAny]
+
+        try:
+            response = await self._client.post(
+                f"{self._backend.base_url}/v1/account/match-loadouts",
+                params={"match_id": data.match_id},
+                json=body,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            logger.warning(f"POST /v1/account/match-loadouts transport error: {e}")
+            return
+        if response.status_code in (202, 204):
+            logger.info(f"Submitted ingame loadout snapshot (HTTP {response.status_code})")
+            return
+        logger.warning(
+            f"POST /v1/account/match-loadouts -> HTTP {response.status_code} body={response.text[:200]!r}"
+        )
     # ------------------- Flush loop -------------------
 
     async def _flush_loop(self) -> None:
@@ -253,14 +363,24 @@ class SubmissionService:
             return
 
         items: list[dict[str, Any]] = []
+        dropped_sentinel = 0
         for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                items.append(json.loads(line))  # pyright: ignore[reportAny]
+                entry: dict[str, Any] = json.loads(line)  # pyright: ignore[reportAny]
             except json.JSONDecodeError:
                 logger.warning(f"Dropping malformed pending entry in {path.name}")
+                continue
+            if entry.get("riot_status") == 0:
+                dropped_sentinel += 1
+                continue
+            items.append(entry)
+        if dropped_sentinel:
+            logger.warning(
+                f"Dropped {dropped_sentinel} pending entr(ies) from {path.name} with sentinel riot_status=0"
+            )
 
         if not items:
             try:
@@ -375,8 +495,8 @@ class SubmissionService:
             return
         try:
             payload, status = await self._session.general_get_details_raw(match_id, shard=shard)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Task detail {match_id[:8]} on {shard} raised: {e}")
+        except Exception:  # noqa: BLE001
+            logger.exception(f"Task detail {match_id[:8]} on {shard} raised")
             await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
                 shard=shard, match_id=match_id, riot_status=0, match_details=None,
             ))
@@ -431,8 +551,8 @@ class SubmissionService:
             _parsed, raw, status = await self._session.general_get_history_raw(
                 asm.puuid, start_index=start, end_index=end, shard=asm.shard,
             )
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"History page {asm.puuid[:8]} [{start},{end}) raised: {e}")
+        except Exception:  # noqa: BLE001
+            logger.exception(f"History page {asm.puuid[:8]} [{start},{end}) raised")
             if asm.failed_status is None:
                 asm.failed_status = 0
             asm.pending_pages -= 1

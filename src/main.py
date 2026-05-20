@@ -6,41 +6,77 @@ then runs in the background until SIGINT/SIGTERM.
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import logging
 import signal
+import sys
+import traceback
 from pathlib import Path
 
-from services.event_bus import EventBus, Event
-from services.launch_observer import RiotClientWatcher, ProcessWatcher
-from services.auth_service import AuthHandler
-from services.backend_service import BackendCommunicationService
-from services.gamesocket import GameSocketHandler
-from services.gamestates import GamestateHandler
-from services.submission_service import SubmissionService
-from services.config_manager import ConfigManager
-from services.hardware_service import collect_and_emit as collect_hardware
 
-from utils.file_utils import get_config_path, get_watermark_path
+def _app_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
 
 
 _log_format = "%(asctime)s | %(levelname)-7s | %(name)-20s | %(message)s"
 _log_datefmt = "%H:%M:%S"
 
+_log_dir = _app_base_dir() / "data"
+_log_dir.mkdir(parents=True, exist_ok=True)
+
+_debug_log_path = _log_dir / "debug.log"
+_error_log_path = _log_dir / "errors.log"
+_fault_log_path = _log_dir / "fault.log"
+
+# Native crashes (segfaults, stack overflows) — written before Python unwinds.
+_fault_log_file = open(_fault_log_path, "a", buffering=1, encoding="utf-8")
+faulthandler.enable(file=_fault_log_file)
+
 logging.basicConfig(
     level=logging.INFO,
     format=_log_format,
     datefmt=_log_datefmt,
+    handlers=[
+        logging.StreamHandler(sys.stderr),
+        logging.FileHandler(_debug_log_path, encoding="utf-8"),
+    ],
 )
 
-# File handler: warnings and above go to data/errors.log
-_error_log_path = Path(__file__).resolve().parents[1] / "data" / "errors.log"
-_error_log_path.parent.mkdir(parents=True, exist_ok=True)
-_file_handler = logging.FileHandler(_error_log_path, encoding="utf-8")
-_file_handler.setLevel(logging.WARNING)
-_file_handler.setFormatter(logging.Formatter(_log_format, datefmt=_log_datefmt))
-logging.getLogger().addHandler(_file_handler)
+_err_handler = logging.FileHandler(_error_log_path, encoding="utf-8")
+_err_handler.setLevel(logging.WARNING)
+_err_handler.setFormatter(logging.Formatter(_log_format, datefmt=_log_datefmt))
+logging.getLogger().addHandler(_err_handler)
 
 logger: logging.Logger = logging.getLogger("main")
+
+
+def _excepthook(exc_type, exc, tb) -> None:
+    logger.critical(
+        "UNCAUGHT EXCEPTION\n%s",
+        "".join(traceback.format_exception(exc_type, exc, tb)),
+    )
+
+
+sys.excepthook = _excepthook
+logger.info("logging initialized | base_dir=%s | frozen=%s", _app_base_dir(), getattr(sys, "frozen", False))
+
+try:
+    from services.event_bus import EventBus, Event
+    from services.launch_observer import RiotClientWatcher, ProcessWatcher
+    from services.auth_service import AuthHandler
+    from services.backend_service import BackendCommunicationService
+    from services.gamesocket import GameSocketHandler
+    from services.gamestates import GamestateHandler
+    from services.submission_service import SubmissionService
+    from services.config_manager import ConfigManager
+    from services.hardware_service import collect_and_emit as collect_hardware
+
+    from utils.file_utils import get_config_path, get_watermark_path
+except Exception:
+    logger.critical("Import failed at startup", exc_info=True)
+    raise
 
 class ValorantStatsApp:
     """Orchestrates all components."""
@@ -138,4 +174,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        logger.critical("Fatal error in main()", exc_info=True)
+        raise
+    finally:
+        logging.shutdown()

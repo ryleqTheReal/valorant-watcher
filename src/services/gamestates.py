@@ -24,6 +24,7 @@ from services.match_collector import MatchCollector
 from services.request_scheduler import RequestScheduler
 from utils.models import (
     GameStateTransition,
+    IngameLoadoutsEvent,
     ItemTypes,
     LockfileData,
     Presence,
@@ -112,7 +113,7 @@ class GamestateHandler:
         self._valorant_open: bool = False
         self._presence_poll_task: asyncio.Task[None] | None = None
         self._pregame_poll_task: asyncio.Task[None] | None = None
-        self._active_match_id: str | None = None
+        self.active_match_id: str | None = None
         self._loadout_version: int | None = None
         self._owned_item_count: int | None = None
         self._xp_version: int | None = None
@@ -478,11 +479,11 @@ class GamestateHandler:
         Match collection requests are enqueued after the general checks,
         so player data is always fetched first.
         """
-        self._scheduler.enqueue_general(self._check_owned, "owned items")
-        self._scheduler.enqueue_general(self._check_loadout, "loadout")
-        self._scheduler.enqueue_general(self._check_xp, "xp")
-        self._scheduler.enqueue_general(self._check_penalties, "penalties")
-        self._scheduler.enqueue_general(self._check_mmr, "mmr")
+        self._scheduler.enqueue_account(self._check_owned, "owned items")
+        self._scheduler.enqueue_account(self._check_loadout, "loadout")
+        self._scheduler.enqueue_account(self._check_xp, "xp")
+        self._scheduler.enqueue_account(self._check_penalties, "penalties")
+        self._scheduler.enqueue_account(self._check_mmr, "mmr")
 
         # Match collector is already running (started on AUTH_SUCCESS).
         # Its self-scheduled requests interleave with these general checks.
@@ -666,7 +667,7 @@ class GamestateHandler:
         if self._current_state is not None:
             logger.info("Game state cleared (Valorant closed, match collector still active)")
         self._current_state = None
-        self._active_match_id = None
+        self.active_match_id = None
         self._active_queue_id = None
         self._loadout_version = None
         self._owned_item_count = None
@@ -739,7 +740,7 @@ class GamestateHandler:
     async def _fetch_ingame_match(self) -> None:
         """Fetch ingame match data once (GLZ is not rate-limited).
 
-        Gets the match ID, stores it on self._active_match_id, fetches
+        Gets the match ID, stores it on self.active_match_id, fetches
         the full match data, and emits INGAME_MATCH_UPDATED.
         """
         if not self._session:
@@ -751,7 +752,7 @@ class GamestateHandler:
                 logger.warning("No ingame match ID returned")
                 return
 
-            self._active_match_id = match_id
+            self.active_match_id = match_id
             match_data = await self._session.ingame_get_match(match_id)
             _ = await self.bus.emit(Event.INGAME_MATCH_UPDATED, match_data)
             logger.info(f"Ingame match loaded: {match_id}")
@@ -764,15 +765,18 @@ class GamestateHandler:
         Retries with a 2s delay until successful, match ends, or cancelled.
         This is the most valuable data, we never give up while the match is active.
         """
-        if not self._session or not self._active_match_id:
+        if not self._session or not self.active_match_id:
             return
 
-        match_id = self._active_match_id
+        match_id = self.active_match_id
 
         while True:
             try:
                 loadouts = await self._session.ingame_get_loadouts(match_id)
-                _ = await self.bus.emit(Event.INGAME_LOADOUTS_FETCHED, loadouts)
+                _ = await self.bus.emit(
+                    Event.INGAME_LOADOUTS_FETCHED,
+                    IngameLoadoutsEvent(match_id=match_id, loadouts=loadouts),
+                )
                 logger.info(f"Ingame loadouts fetched for match {match_id}")
                 return
             except asyncio.CancelledError:
@@ -783,7 +787,7 @@ class GamestateHandler:
                 await asyncio.sleep(2)
 
                 # Check if match is still active (state may have changed during sleep)
-                if self._active_match_id != match_id:
+                if self.active_match_id != match_id:
                     logger.info("Ingame loadouts fetch aborted: match ended")
                     return
 
@@ -879,7 +883,7 @@ class GamestateHandler:
                     except Exception as e:
                         fut.set_exception(e)
 
-                self._scheduler.enqueue_general(_fetch_store, "store offers")
+                self._scheduler.enqueue_account(_fetch_store, "store offers")
 
                 try:
                     store = await future

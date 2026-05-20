@@ -1,17 +1,21 @@
 """
 Priority request scheduler for Riot API requests.
 
-Manages two queues with different lifecycle behaviors:
+Manages four queues with different lifecycle behaviors:
 
-- **State queue** (high priority): Requests bound to the current game state
+- **State queue** (highest): Requests bound to the current game state
   (e.g. pregame match info, core-game data). Purged when the loop state changes.
-- **General queue** (low priority): Persistent requests that survive state
-  changes (e.g. loadout, owned items, XP). Only processed once the state
-  queue is empty.
+- **Account queue** (high): Account-info checks the local app cares about
+  (loadout, owned items, XP, penalties, MMR, store). Always runs before
+  server-issued tasks so we can establish/refresh local baselines.
+- **Task queue** (mid): Server-issued task requests from /v1/tasks.
+- **General queue** (low): Persistent background requests that survive state
+  changes (e.g. match-history sweep). Only processed once everything else is
+  empty.
 
-A single worker coroutine drains the state queue first, then falls back to
-the general queue.  The scheduler can be paused (e.g. during the ratelimit
-offset window) and resumed without losing queued work.
+A single worker coroutine drains queues in priority order. The scheduler can
+be paused (e.g. during the ratelimit offset window) and resumed without
+losing queued work.
 """
 
 from __future__ import annotations
@@ -188,6 +192,7 @@ class RequestScheduler:
         aggressive_limit: int = 24,
     ) -> None:
         self._state_queue: deque[QueuedRequest] = deque()
+        self._account_queue: deque[QueuedRequest] = deque()
         self._task_queue: deque[QueuedRequest] = deque()
         self._general_queue: deque[QueuedRequest] = deque()
 
@@ -226,6 +231,10 @@ class RequestScheduler:
     def task_queue_size(self) -> int:
         return len(self._task_queue)
 
+    @property
+    def account_queue_size(self) -> int:
+        return len(self._account_queue)
+
     def start(self, aggressive: bool = False) -> None:
         """Start the worker loop, no-op if already running
 
@@ -253,6 +262,7 @@ class RequestScheduler:
         self._worker_task = None
         self._cancel_current()
         self._state_queue.clear()
+        self._account_queue.clear()
         self._task_queue.clear()
         self._general_queue.clear()
         logger.info("Request scheduler stopped")
@@ -291,6 +301,16 @@ class RequestScheduler:
         """Add a state-bound request (high priority, purged on state change)."""
         self._state_queue.append(QueuedRequest(execute=execute, label=label))
         logger.debug(f"Enqueued state request: {label}")
+        self._wake()
+
+    def enqueue_account(
+        self,
+        execute: Callable[[], Awaitable[Any]],  # pyright: ignore[reportExplicitAny]
+        label: str = "",
+    ) -> None:
+        """Add an account-info request (high priority, pre-empts tasks/general, survives state changes)."""
+        self._account_queue.append(QueuedRequest(execute=execute, label=label))
+        logger.debug(f"Enqueued account request: {label}")
         self._wake()
 
     def enqueue_task(
@@ -333,6 +353,8 @@ class RequestScheduler:
         """
         if self._state_queue:
             return self._state_queue.popleft(), True
+        if self._account_queue:
+            return self._account_queue.popleft(), False
         if self._task_queue:
             return self._task_queue.popleft(), False
         if self._general_queue:

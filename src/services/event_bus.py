@@ -71,8 +71,6 @@ class Listener:
     name: str = ""           # Debug label
 
 
-
-
 class EventBus:
     """
     Central event bus.
