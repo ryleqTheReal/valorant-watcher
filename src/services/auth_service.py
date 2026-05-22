@@ -678,6 +678,46 @@ class RiotSession:
             return None, None, response.status_code
         return MatchHistoryResponse(**raw), raw, response.status_code  # pyright: ignore[reportAny]
 
+    async def general_get_competitive_updates_raw(
+        self,
+        puuid: str,
+        start_index: int,
+        end_index: int,
+        shard: str | None = None,
+    ) -> tuple[dict[str, Any] | None, int, str | None]:  # pyright: ignore[reportExplicitAny]
+        """Fetch one page of competitive updates without raising on HTTP errors.
+
+        Returns:
+            (payload, riot_status, error_code).
+            - payload is None when riot_status != 200.
+            - error_code is the body's ``errorCode`` string when one is
+              present (e.g. "BAD_PARAMETER", "BAD_CLAIMS"); None otherwise.
+              Riot signals "no more pages" with 400 + errorCode=BAD_PARAMETER.
+        """
+        response = await self.fetch(
+            "GET", "pd",
+            EndpointURI(f"/mmr/v1/players/{puuid}/competitiveupdates"),
+            params={"startIndex": str(start_index), "endIndex": str(end_index)},
+            shard=shard,
+            raise_on_error=False,
+        )
+        if response.status_code == 200:
+            try:
+                return response.json(), 200, None  # pyright: ignore[reportAny]
+            except ValueError:
+                return None, response.status_code, None
+
+        error_code: str | None = None
+        try:
+            body = response.json()  # pyright: ignore[reportAny]
+            if isinstance(body, dict):
+                ec = body.get("errorCode")  # pyright: ignore[reportAny]
+                if isinstance(ec, str):
+                    error_code = ec
+        except ValueError:
+            pass
+        return None, response.status_code, error_code
+
     async def general_get_leaderboard(self, start_index: int = 0, size: int = 510, query: str | None = None) -> LeaderboardResponse:
         """Fetch the region's competitive leaderboard
 

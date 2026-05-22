@@ -31,24 +31,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from services.assembler import CompetitiveUpdateAssembler, HistoryAssembler
 from services.auth_service import RiotSession
 from services.backend_service import BackendCommunicationService
 from services.event_bus import Event, EventBus
 from services.gamestates import GamestateHandler
 from services.request_scheduler import RequestScheduler
 from utils.file_utils import (
+    get_pending_competitive_updates_path,
     get_pending_histories_path,
     get_pending_matches_path,
 )
 from utils.models import (
     AccountXPResponse,
+    CompetitiveUpdateEvent,
     IngameLoadoutsEvent,
     MatchDetailEvent,
     MatchHistoryEvent,
@@ -63,26 +65,12 @@ logger: logging.Logger = logging.getLogger(__name__)
 # rely on _submit_with_split to halve further on 413.
 _MATCH_BATCH_MAX: int = 10
 _HISTORY_BATCH_MAX: int = 50
+_COMP_UPDATE_BATCH_MAX: int = 50
 _FLUSH_INTERVAL_SEC: float = 20.0
 _TASK_POLL_INTERVAL_SEC: float = 20.0
 _TASK_REFILL_THRESHOLD: int = 5
 _TASKS_NEEDED: int = 15
-_HISTORY_PAGE_SIZE: int = 20
 _RATELIMIT_RETRY_DELAY: float = 5.0  # local cushion before re-enqueueing a 429
-
-
-@dataclass(slots=True)
-class _HistoryAssembly:
-    """Per-PUUID aggregation state for an in-flight match_history task."""
-
-    puuid: str
-    shard: str
-    pages: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
-    max_total: int = 0
-    max_end_index: int = 0
-    pending_pages: int = 0
-    failed_status: int | None = None  # First non-200/non-429 status seen
-    probe_done: bool = False
 
 
 class SubmissionService:
@@ -101,18 +89,22 @@ class SubmissionService:
 
         self._client: httpx.AsyncClient = httpx.AsyncClient(timeout=20.0)
 
-        self._matches_buffer: list[dict[str, Any]] = []
-        self._histories_buffer: list[dict[str, Any]] = []
+        self._matches_buffer: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
+        self._histories_buffer: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
+        self._comp_updates_buffer: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
         self._buffer_lock: asyncio.Lock = asyncio.Lock()
         # Serialize submission per endpoint so the periodic flush and the
         # size-cap flush cannot both drain the pending file at the same time.
         self._match_submit_lock: asyncio.Lock = asyncio.Lock()
         self._history_submit_lock: asyncio.Lock = asyncio.Lock()
+        self._comp_update_submit_lock: asyncio.Lock = asyncio.Lock()
 
         self._pending_matches_path: Path = get_pending_matches_path()
         self._pending_histories_path: Path = get_pending_histories_path()
+        self._pending_comp_updates_path: Path = get_pending_competitive_updates_path()
 
-        self._assemblies: dict[str, _HistoryAssembly] = {}
+        self._assembler: HistoryAssembler | None = None
+        self._comp_update_assembler: CompetitiveUpdateAssembler | None = None
 
         self._flush_task: asyncio.Task[None] | None = None
         self._task_task: asyncio.Task[None] | None = None
@@ -126,6 +118,7 @@ class SubmissionService:
         _ = self._bus.on(Event.SHUTDOWN, self._on_shutdown, priority=0)
         _ = self._bus.on(Event.MATCH_DETAIL_FETCHED, self._on_match_detail, priority=0)
         _ = self._bus.on(Event.MATCH_HISTORY_FETCHED, self._on_match_history, priority=0)
+        _ = self._bus.on(Event.COMPETITIVE_UPDATE_FETCHED, self._on_competitive_update, priority=0)
         _ = self._bus.on(Event.USER_XP_UPDATED, self._on_user_xp_updated, priority=0)
         _ = self._bus.on(Event.OWNED_ITEMS_UPDATED, self._on_owned_items_updated, priority=0)
         _ = self._bus.on(Event.INGAME_LOADOUTS_FETCHED, self._on_ingame_loadouts_fetched, priority=0)
@@ -135,6 +128,10 @@ class SubmissionService:
 
     async def _on_auth_success(self, data: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
         self._session = data["session"]
+        self._assembler = HistoryAssembler(self._session, self._scheduler, self._bus)
+        self._comp_update_assembler = CompetitiveUpdateAssembler(
+            self._session, self._scheduler, self._bus,
+        )
         if self._flush_task is None or self._flush_task.done():
             self._flush_task = asyncio.create_task(self._flush_loop())
         if self._task_task is None or self._task_task.done():
@@ -143,7 +140,8 @@ class SubmissionService:
     async def _on_rso_logout(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportAny, reportUnusedParameter]
         await self._flush_all()
         self._session = None
-        self._assemblies.clear()
+        self._assembler = None
+        self._comp_update_assembler = None
 
     async def _on_shutdown(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportAny, reportUnusedParameter]
         self._cancelled.set()
@@ -152,12 +150,12 @@ class SubmissionService:
 
     async def _on_match_detail(self, ev: MatchDetailEvent) -> None:
         # riot_status == 0 is an internal transport-failure sentinel; the
-        # backend's schema rejects it. Drop silently — the task will be
+        # backend's schema rejects it. Drop silently: the task will be
         # re-issued on the next /v1/tasks poll.
         if ev.riot_status == 0:
             logger.debug(f"Dropping match-detail {ev.match_id[:8]} with sentinel riot_status=0")
             return
-        item: dict[str, Any] = {
+        item: dict[str, Any] = {  # pyright: ignore[reportExplicitAny]
             "match_id": ev.match_id,
             "shard": ev.shard,
             "riot_status": ev.riot_status,
@@ -170,11 +168,34 @@ class SubmissionService:
         if should_flush:
             _ = asyncio.create_task(self._flush_matches())
 
+    async def _on_competitive_update(self, ev: CompetitiveUpdateEvent) -> None:
+        # The assembler already filters discardable statuses (BAD_CLAIMS,
+        # persistent 429) before emitting. Any event that lands here is
+        # either a successful assembly (200 with payload) or an explicit
+        # failure (non-200 with payload=None) that the backend wants to
+        # see so it can confirm the work item as broken.
+        if ev.riot_status == 0:
+            logger.debug(f"Dropping comp-update {ev.puuid[:8]} with sentinel riot_status=0")
+            return
+        item: dict[str, Any] = {  # pyright: ignore[reportExplicitAny]
+            "shard": ev.shard,
+            "puuid": ev.puuid,
+            "riot_status": ev.riot_status,
+            "fetch_time": ev.fetch_time_ms,
+            "competitive_updates": ev.competitive_updates,
+        }
+        should_flush: bool = False
+        async with self._buffer_lock:
+            self._comp_updates_buffer.append(item)
+            should_flush = len(self._comp_updates_buffer) >= _COMP_UPDATE_BATCH_MAX
+        if should_flush:
+            _ = asyncio.create_task(self._flush_comp_updates())
+
     async def _on_match_history(self, ev: MatchHistoryEvent) -> None:
         if ev.riot_status == 0:
             logger.debug(f"Dropping match-history {ev.puuid[:8]} with sentinel riot_status=0")
             return
-        item: dict[str, Any] = {
+        item: dict[str, Any] = {  # pyright: ignore[reportExplicitAny]
             "puuid": ev.puuid,
             "shard": ev.shard,
             "riot_status": ev.riot_status,
@@ -298,12 +319,14 @@ class SubmissionService:
             try:
                 await self._flush_matches()
                 await self._flush_histories()
+                await self._flush_comp_updates()
             except Exception:  # noqa: BLE001
                 logger.exception("Periodic flush failed")
 
     async def _flush_all(self) -> None:
         await self._flush_matches()
         await self._flush_histories()
+        await self._flush_comp_updates()
 
     async def _flush_matches(self) -> None:
         async with self._match_submit_lock:
@@ -326,6 +349,21 @@ class SubmissionService:
                 self._histories_buffer = self._histories_buffer[_HISTORY_BATCH_MAX:]
             if not await self._post_batch("/v1/histories", batch):
                 self._spill(self._pending_histories_path, batch)
+
+    async def _flush_comp_updates(self) -> None:
+        async with self._comp_update_submit_lock:
+            await self._drain_pending(
+                self._pending_comp_updates_path,
+                "/v1/competitive-updates",
+                _COMP_UPDATE_BATCH_MAX,
+            )
+            async with self._buffer_lock:
+                if not self._comp_updates_buffer:
+                    return
+                batch = self._comp_updates_buffer[:_COMP_UPDATE_BATCH_MAX]
+                self._comp_updates_buffer = self._comp_updates_buffer[_COMP_UPDATE_BATCH_MAX:]
+            if not await self._post_batch("/v1/competitive-updates", batch):
+                self._spill(self._pending_comp_updates_path, batch)
 
     async def _post_batch(self, path: str, batch: list[dict[str, Any]]) -> bool:
         if not batch:
@@ -417,7 +455,7 @@ class SubmissionService:
             logger.debug(f"Could not remove drained pending file {path}: {e}")
 
     @staticmethod
-    def _rewrite_pending(path: Path, items: list[dict[str, Any]]) -> None:
+    def _rewrite_pending(path: Path, items: list[dict[str, Any]]) -> None:  # pyright: ignore[reportExplicitAny]
         try:
             tmp = path.with_suffix(path.suffix + ".tmp")
             lines = "\n".join(json.dumps(item, separators=(",", ":")) for item in items)
@@ -466,12 +504,9 @@ class SubmissionService:
             return
 
         try:
-            tasks: list[dict[str, Any]] = response.json()  # pyright: ignore[reportAny]
+            tasks: list[dict[str, Any]] = response.json()  # pyright: ignore[reportAny, reportExplicitAny]
         except ValueError:
             logger.warning("GET /v1/tasks returned non-JSON body")
-            return
-
-        if not isinstance(tasks, list):  # pyright: ignore[reportUnnecessaryIsInstance]
             return
 
         if not tasks:
@@ -481,7 +516,7 @@ class SubmissionService:
         for task in tasks:
             self._dispatch_task(task)
 
-    def _dispatch_task(self, task: dict[str, Any]) -> None:
+    def _dispatch_task(self, task: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
         item_type = task.get("item_type")
         shard = task.get("shard")
         target = task.get("target_id")
@@ -496,7 +531,23 @@ class SubmissionService:
                 f"task detail {target[:8]}",
             )
         elif item_type == "match_history":
-            self._begin_history_task(target, shard)
+            if self._assembler is None:
+                logger.warning(f"Dropping match_history task for {target[:8]}: assembler not ready")
+                return
+            assembler = self._assembler
+            _ = asyncio.create_task(
+                assembler.assemble(target, shard, priority="task")
+            )
+        elif item_type == "competitive_updates":
+            if self._comp_update_assembler is None:
+                logger.warning(
+                    f"Dropping competitive_updates task for {target[:8]}: assembler not ready"
+                )
+                return
+            cu_assembler = self._comp_update_assembler
+            _ = asyncio.create_task(
+                cu_assembler.assemble(target, shard, priority="task")
+            )
         else:
             logger.warning(f"Unknown task item_type: {item_type!r}")
 
@@ -528,131 +579,4 @@ class SubmissionService:
             shard=shard, match_id=match_id, riot_status=status, match_details=payload,
         ))
 
-    # ------------------- Match-history task -------------------
-
-    def _begin_history_task(self, puuid: str, shard: str) -> None:
-        if puuid in self._assemblies:
-            logger.debug(f"History task for {puuid[:8]} already in progress, ignoring duplicate")
-            return
-        asm = _HistoryAssembly(puuid=puuid, shard=shard, pending_pages=1)
-        self._assemblies[puuid] = asm
-        self._scheduler.enqueue_match_history(
-            lambda a=asm, s=0, e=_HISTORY_PAGE_SIZE: self._run_history_page(a, s, e, is_probe=True),
-            "task",
-            f"task history probe {puuid[:8]}",
-        )
-
-    def _enqueue_history_page(self, asm: _HistoryAssembly, start: int, end: int) -> None:
-        asm.pending_pages += 1
-        self._scheduler.enqueue_match_history(
-            lambda a=asm, s=start, e=end: self._run_history_page(a, s, e, is_probe=False),
-            "task",
-            f"task history page {asm.puuid[:8]} [{start},{end})",
-        )
-
-    async def _run_history_page(
-        self,
-        asm: _HistoryAssembly,
-        start: int,
-        end: int,
-        is_probe: bool,
-    ) -> None:
-        if self._session is None:
-            asm.pending_pages -= 1
-            await self._maybe_finalize_history(asm)
-            return
-
-        try:
-            _parsed, raw, status = await self._session.general_get_history_raw(
-                asm.puuid, start_index=start, end_index=end, shard=asm.shard,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception(f"History page {asm.puuid[:8]} [{start},{end}) raised")
-            if asm.failed_status is None:
-                asm.failed_status = 0
-            asm.pending_pages -= 1
-            await self._maybe_finalize_history(asm)
-            return
-
-        # Retry 429s indefinitely until the page succeeds or fails another way.
-        if status == 429:
-            logger.info(f"History page {asm.puuid[:8]} [{start},{end}) got 429; re-enqueueing")
-            await asyncio.sleep(_RATELIMIT_RETRY_DELAY)
-            self._scheduler.enqueue_match_history(
-                lambda a=asm, s=start, e=end, p=is_probe: self._run_history_page(a, s, e, p),
-                "task",
-                f"task history page {asm.puuid[:8]} [{start},{end}) (retry)",
-            )
-            return
-
-        if status != 200 or raw is None:
-            if asm.failed_status is None:
-                asm.failed_status = status
-            asm.pending_pages -= 1
-            await self._maybe_finalize_history(asm)
-            return
-
-        history_entries = raw.get("History") or []
-        total = int(raw.get("Total", 0))  # pyright: ignore[reportAny]
-        end_index_val = int(raw.get("EndIndex", end))  # pyright: ignore[reportAny]
-
-        asm.pages[start] = history_entries if isinstance(history_entries, list) else []
-        if total > asm.max_total:
-            asm.max_total = total
-        if end_index_val > asm.max_end_index:
-            asm.max_end_index = end_index_val
-
-        # Fan out remaining pages once we know Total from the probe.
-        if is_probe and not asm.probe_done:
-            asm.probe_done = True
-            for page_start in range(_HISTORY_PAGE_SIZE, total, _HISTORY_PAGE_SIZE):
-                page_end = min(page_start + _HISTORY_PAGE_SIZE, total)
-                self._enqueue_history_page(asm, page_start, page_end)
-
-        asm.pending_pages -= 1
-        await self._maybe_finalize_history(asm)
-
-    async def _maybe_finalize_history(self, asm: _HistoryAssembly) -> None:
-        if asm.pending_pages > 0:
-            return
-        # Re-check via pop to avoid races with duplicate finalize calls.
-        if self._assemblies.pop(asm.puuid, None) is None:
-            return
-
-        fetch_time_ms = int(time.time() * 1000)
-
-        if asm.failed_status is not None:
-            logger.warning(
-                f"History assembly for {asm.puuid[:8]} on {asm.shard} aborted with status {asm.failed_status}"
-            )
-            await self._bus.emit(Event.MATCH_HISTORY_FETCHED, MatchHistoryEvent(
-                shard=asm.shard,
-                puuid=asm.puuid,
-                riot_status=asm.failed_status,
-                match_history=None,
-                fetch_time_ms=fetch_time_ms,
-            ))
-            return
-
-        merged: list[dict[str, Any]] = []
-        for page_start in sorted(asm.pages.keys()):
-            merged.extend(asm.pages[page_start])
-
-        full_payload: dict[str, Any] = {
-            "Subject": asm.puuid,
-            "BeginIndex": 0,
-            "EndIndex": asm.max_end_index,
-            "Total": asm.max_total,
-            "History": merged,
-        }
-        logger.info(
-            f"History assembly complete for {asm.puuid[:8]} on {asm.shard}: "
-            f"{len(merged)} entries (Total={asm.max_total}, EndIndex={asm.max_end_index})"
-        )
-        await self._bus.emit(Event.MATCH_HISTORY_FETCHED, MatchHistoryEvent(
-            shard=asm.shard,
-            puuid=asm.puuid,
-            riot_status=200,
-            match_history=full_payload,
-            fetch_time_ms=fetch_time_ms,
-        ))
+    # Match-history task assembly is delegated to HistoryAssembler.

@@ -109,3 +109,9 @@ def get_pending_matches_path() -> Path:
 def get_pending_histories_path() -> Path:
     """JSONL spillover for match-history submissions that the backend hasn't acked yet."""
     return get_app_base_dir() / "data" / "pending" / "histories.jsonl"
+
+
+@cache
+def get_pending_competitive_updates_path() -> Path:
+    """JSONL spillover for competitive-updates submissions the backend hasn't acked yet."""
+    return get_app_base_dir() / "data" / "pending" / "competitive_updates.jsonl"

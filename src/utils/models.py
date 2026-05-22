@@ -90,6 +90,7 @@ class AppConfig:
     ratelimit_offset: int = 60                  # Seconds to wait after state change before making API calls
     match_details_interval_ms: int = 1700       # Min ms between subsequent /match-details requests (server recovers 1 every 1700ms)
     match_history_interval_ms: int = 2000       # Min ms between subsequent /match-history requests (TBD: replace once measured)
+    competitive_updates_interval_ms: int = 2050 # Min ms between subsequent /competitiveupdates requests
 
     @classmethod
     def from_config_dict(cls, data: dict[str, object]) -> AppConfig:
@@ -1013,26 +1014,20 @@ class LeaderboardResponse:
 class AccountProgress:
     """Per-account match collection progress.
 
-    Tracks two boundaries that define a "known window":
-    - newest_known_time: most recent match timestamp we've ever seen
-    - oldest_fetched_time: oldest match timestamp we've ever fetched
-
-    Everything between these two times has already been fetched. Fresh matches
-    are newer than newest_known_time; legacy matches are older than
-    oldest_fetched_time.
+    Currently empty: fresh re-assembles the entire history every launch,
+    so the old newest_known_time / oldest_fetched_time / legacy_complete
+    watermark fields are unused. Kept as a struct purely so the JSON file
+    can still distinguish which PUUIDs have ever been observed.
     """
-    newest_known_time: int = 0
-    oldest_fetched_time: int = 0
-    legacy_complete: bool = False
 
 
 @dataclass
 class MatchWatermark:
     """Central cross-session state for match collection.
 
-    Account progress (fresh/legacy boundaries) is per-PUUID since each
-    account has its own match history.  Everything else is shared across
-    all accounts to avoid redundant API calls:
+    Per-account state is currently empty (see AccountProgress); the
+    important state is shared across all accounts to avoid redundant
+    API calls:
 
     - fetched_matches: match IDs whose details have already been fetched
       by *any* account in *any* phase, prevents duplicate detail requests.
@@ -1440,6 +1435,80 @@ class MatchDetailEvent:
     match_id: str
     riot_status: int
     match_details: dict[str, Any] | None
+
+
+@dataclass
+class CompetitiveUpdate:
+    """One competitive-update row inside ValorantCompetitiveUpdatesResponse.Matches.
+
+    Mirrors the Rust struct shape the backend expects. Any fields Riot
+    adds in the future are silently dropped by from_dict.
+    """
+    MatchID: str = ""
+    MapID: str = ""
+    QueueID: str = ""
+    SeasonID: str = ""
+    MatchStartTime: int = 0
+    MatchLength: int = 0
+    TierAfterUpdate: int = 0
+    TierBeforeUpdate: int = 0
+    RankedRatingAfterUpdate: int = 0
+    RankedRatingBeforeUpdate: int = 0
+    RankedRatingEarned: int = 0
+    RankedRatingPerformanceBonus: int = 0
+    RankedRatingRefundApplied: int = 0
+    NewMapIncentiveRRForgiven: int = 0
+    CompetitiveMovement: str = ""
+    AFKPenalty: int = 0
+    WasDerankProtected: bool = False
+    WasDerankProtectionReplenished: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CompetitiveUpdate:  # pyright: ignore[reportExplicitAny]
+        known = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in data.items() if k in known})  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class ValorantCompetitiveUpdatesResponse:
+    """One page of GET /mmr/v1/players/{puuid}/competitiveupdates.
+
+    Riot doesn't tell us Total/StartIndex/EndIndex — the assembler pages
+    by 20 until it sees a short page or a 400 BAD_PARAMETER. Unknown
+    fields are dropped by from_dict; nested Matches are parsed into
+    CompetitiveUpdate instances.
+    """
+    Subject: str = ""
+    Version: int = 0
+    Matches: list[CompetitiveUpdate] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ValorantCompetitiveUpdatesResponse:  # pyright: ignore[reportExplicitAny]
+        known = cls.__dataclass_fields__
+        filtered: dict[str, Any] = {k: v for k, v in data.items() if k in known}  # pyright: ignore[reportExplicitAny]
+        raw_matches = filtered.pop("Matches", []) or []
+        matches: list[CompetitiveUpdate] = [
+            CompetitiveUpdate.from_dict(m) if isinstance(m, dict) else m  # pyright: ignore[reportUnknownArgumentType]
+            for m in raw_matches  # pyright: ignore[reportAny]
+        ]
+        return cls(Matches=matches, **filtered)  # pyright: ignore[reportArgumentType]
+
+
+@dataclass
+class CompetitiveUpdateEvent:
+    """Payload for Event.COMPETITIVE_UPDATE_FETCHED.
+
+    Emitted once an assembly is done — either successfully (riot_status==200
+    with the merged ValorantCompetitiveUpdatesResponse-as-dict), or
+    explicitly failed (riot_status reflects the Riot error; competitive_updates
+    is None). Discardable statuses (BAD_CLAIMS, 429 after retries exhausted)
+    are NOT emitted — they are swallowed silently inside the assembler.
+    """
+    shard: str
+    puuid: str
+    riot_status: int
+    competitive_updates: dict[str, Any] | None
+    fetch_time_ms: int
 
 
 @dataclass

@@ -94,6 +94,7 @@ class ValorantStatsApp:
             ratelimit_offset=self.cfg.config.ratelimit_offset,
             match_details_interval_ms=self.cfg.config.match_details_interval_ms,
             match_history_interval_ms=self.cfg.config.match_history_interval_ms,
+            competitive_updates_interval_ms=self.cfg.config.competitive_updates_interval_ms,
         )
         server_base_url = self.cfg.config.server_base_url
         if not server_base_url:

@@ -40,6 +40,7 @@ class Event(Enum):
     MMR_HISTORY_UPDATED = "MMR_HISTORY_UPDATED" # The player's MMR history has updated
     MATCH_DETAIL_FETCHED = "MATCH_DETAIL_FETCHED" # A match's full details have been fetched (MatchDetailEvent payload)
     MATCH_HISTORY_FETCHED = "MATCH_HISTORY_FETCHED" # A player's match history page has been fetched (MatchHistoryEvent payload)
+    COMPETITIVE_UPDATE_FETCHED = "COMPETITIVE_UPDATE_FETCHED" # A player's competitive update has been fully assembled or aborted (CompetitiveUpdateEvent payload)
     LEADERBOARD_FETCHED = "LEADERBOARD_FETCHED" # Leaderboard data has been retrieved
     PREGAME_MATCH_UPDATED = "PREGAME_MATCH_UPDATED" # Pregame match data fetched during agent select
     INGAME_MATCH_UPDATED = "INGAME_MATCH_UPDATED"   # Ingame match data fetched when match starts

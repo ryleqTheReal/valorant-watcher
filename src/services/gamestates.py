@@ -97,6 +97,7 @@ class GamestateHandler:
         ratelimit_offset: int = 60,
         match_details_interval_ms: int = 1700,
         match_history_interval_ms: int = 2000,
+        competitive_updates_interval_ms: int = 2050,
     ) -> None:
         self.bus: EventBus = bus
         self._watermark_path: Path = watermark_path
@@ -107,6 +108,7 @@ class GamestateHandler:
         self._scheduler: RequestScheduler = RequestScheduler(
             match_details_interval_s=match_details_interval_ms / 1000.0,
             match_history_interval_s=match_history_interval_ms / 1000.0,
+            competitive_updates_interval_s=competitive_updates_interval_ms / 1000.0,
         )
         self._match_collector: MatchCollector | None = None
         self._valorant_open: bool = False

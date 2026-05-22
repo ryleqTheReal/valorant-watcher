@@ -17,11 +17,14 @@ Three independent workers run in parallel, each draining its own queue(s):
   issued task) > ``dig`` (background sweep). Strict priority, FIFO
   within a tier. Pausable.
 
-- **match-history worker** — same shape as match-details, separate
+- **match-history worker**: same shape as match-details, separate
   pacer and separate sub-queues. Pausable.
 
-Pause/resume affects only the two paced workers. Stop tears down all
-three. Game-state transitions purge the state queue (and cancel the
+- **competitive-updates worker**: same shape, separate pacer
+  (default 2050ms) and separate sub-queues. Pausable.
+
+Pause/resume affects only the three paced workers. Stop tears down all
+four. Game-state transitions purge the state queue (and cancel the
 in-flight state request) but leave the paced queues intact, so a
 freshly-finished match still submits after the transition.
 """
@@ -74,23 +77,25 @@ class QueuedRequest:
 
 
 class RequestScheduler:
-    """Three-worker priority scheduler for API requests.
+    """Four-worker priority scheduler for API requests.
 
     See module docstring for the queue/worker layout. Public surface:
 
-    - ``enqueue_state(execute, label)`` — unlimited, purged on state change
-    - ``enqueue_userinfo(execute, label)`` — unlimited, persistent
-    - ``enqueue_match_details(execute, priority, label)`` — paced
-    - ``enqueue_match_history(execute, priority, label)`` — paced
-    - ``pause()`` / ``resume()`` — affects paced workers only
-    - ``on_state_change()`` — purges state queue, cancels in-flight state req
-    - ``start()`` / ``stop()`` — lifecycle
+    - ``enqueue_state(execute, label)``: unlimited, purged on state change
+    - ``enqueue_userinfo(execute, label)``: unlimited, persistent
+    - ``enqueue_match_details(execute, priority, label)``: paced
+    - ``enqueue_match_history(execute, priority, label)``: paced
+    - ``enqueue_competitive_updates(execute, priority, label)``: paced
+    - ``pause()`` / ``resume()``: affects paced workers only
+    - ``on_state_change()``: purges state queue, cancels in-flight state req
+    - ``start()`` / ``stop()``: lifecycle
     """
 
     def __init__(
         self,
         match_details_interval_s: float,
         match_history_interval_s: float,
+        competitive_updates_interval_s: float,
     ) -> None:
         # Unlimited worker queues
         self._state_queue: deque[QueuedRequest] = deque()
@@ -106,14 +111,21 @@ class RequestScheduler:
         self._mh_task_queue: deque[QueuedRequest] = deque()
         self._mh_dig_queue: deque[QueuedRequest] = deque()
 
+        # competitive-updates sub-priority queues
+        self._cu_self_queue: deque[QueuedRequest] = deque()
+        self._cu_task_queue: deque[QueuedRequest] = deque()
+        self._cu_dig_queue: deque[QueuedRequest] = deque()
+
         # Pacers
         self._md_pacer: IntervalPacer = IntervalPacer(match_details_interval_s, "match-details")
         self._mh_pacer: IntervalPacer = IntervalPacer(match_history_interval_s, "match-history")
+        self._cu_pacer: IntervalPacer = IntervalPacer(competitive_updates_interval_s, "competitive-updates")
 
         # Per-worker wake-up signals
         self._unlimited_notify: asyncio.Event = asyncio.Event()
         self._md_notify: asyncio.Event = asyncio.Event()
         self._mh_notify: asyncio.Event = asyncio.Event()
+        self._cu_notify: asyncio.Event = asyncio.Event()
 
         # Paced-worker pause gate (shared by md + mh; unlimited ignores it)
         self._paced_active: asyncio.Event = asyncio.Event()
@@ -144,12 +156,20 @@ class RequestScheduler:
         return len(self._mh_task_queue)
 
     @property
+    def competitive_updates_task_queue_size(self) -> int:
+        return len(self._cu_task_queue)
+
+    @property
     def task_queue_size(self) -> int:
         """Combined count of outstanding ``task``-priority paced requests."""
-        return len(self._md_task_queue) + len(self._mh_task_queue)
+        return (
+            len(self._md_task_queue)
+            + len(self._mh_task_queue)
+            + len(self._cu_task_queue)
+        )
 
     def start(self) -> None:
-        """Start the three worker loops. No-op if already running."""
+        """Start the four worker loops. No-op if already running."""
         if self._running:
             return
         self._running = True
@@ -158,8 +178,9 @@ class RequestScheduler:
             asyncio.create_task(self._unlimited_worker()),
             asyncio.create_task(self._match_details_worker()),
             asyncio.create_task(self._match_history_worker()),
+            asyncio.create_task(self._competitive_updates_worker()),
         ]
-        logger.info("Request scheduler started (3 workers)")
+        logger.info("Request scheduler started (4 workers)")
 
     def stop(self) -> None:
         """Stop all workers and purge every queue."""
@@ -168,6 +189,7 @@ class RequestScheduler:
         self._unlimited_notify.set()
         self._md_notify.set()
         self._mh_notify.set()
+        self._cu_notify.set()
         self._paced_active.set()  # unblock any pause waits so the worker can exit
         for w in self._workers:
             if not w.done():
@@ -182,6 +204,9 @@ class RequestScheduler:
         self._mh_self_queue.clear()
         self._mh_task_queue.clear()
         self._mh_dig_queue.clear()
+        self._cu_self_queue.clear()
+        self._cu_task_queue.clear()
+        self._cu_dig_queue.clear()
         logger.info("Request scheduler stopped")
 
     def pause(self) -> None:
@@ -197,6 +222,7 @@ class RequestScheduler:
         self._paced_active.set()
         self._md_notify.set()
         self._mh_notify.set()
+        self._cu_notify.set()
 
     def on_state_change(self) -> None:
         """Handle a game-state transition.
@@ -246,6 +272,16 @@ class RequestScheduler:
         logger.debug(f"Enqueued match-history({priority}) request: {label}")
         self._mh_notify.set()
 
+    def enqueue_competitive_updates(
+        self,
+        execute: Callable[[], Awaitable[Any]],  # pyright: ignore[reportExplicitAny]
+        priority: Priority,
+        label: str = "",
+    ) -> None:
+        self._priority_queue_cu(priority).append(QueuedRequest(execute=execute, label=label))
+        logger.debug(f"Enqueued competitive-updates({priority}) request: {label}")
+        self._cu_notify.set()
+
     # ------------------- Internal -------------------
 
     def _priority_queue_md(self, priority: Priority) -> deque[QueuedRequest]:
@@ -265,6 +301,15 @@ class RequestScheduler:
                 return self._mh_task_queue
             case "dig":
                 return self._mh_dig_queue
+
+    def _priority_queue_cu(self, priority: Priority) -> deque[QueuedRequest]:
+        match priority:
+            case "self":
+                return self._cu_self_queue
+            case "task":
+                return self._cu_task_queue
+            case "dig":
+                return self._cu_dig_queue
 
     def _cancel_current_state(self) -> None:
         if self._current_state_task and not self._current_state_task.done():
@@ -305,7 +350,7 @@ class RequestScheduler:
                 continue
 
             try:
-                task: asyncio.Task[Any] = asyncio.create_task(item.execute())  # pyright: ignore[reportExplicitAny]
+                task: asyncio.Task[Any] = asyncio.create_task(coro=item.execute())  # pyright: ignore[reportExplicitAny, reportArgumentType, reportUnknownVariableType]
                 if from_state:
                     self._current_state_task = task
                 logger.debug(f"Executing {'state' if from_state else 'userinfo'} request: {item.label}")
@@ -345,7 +390,7 @@ class RequestScheduler:
                 await pacer.acquire()
                 # Re-check pause after acquire (it may have flipped while sleeping)
                 if not self._paced_active.is_set():
-                    # Put item back at the front of its priority tier — simplest
+                    # Put item back at the front of its priority tier -> simplest
                     # is to re-enqueue at the head of the highest-priority queue
                     # it would belong to. Since we lost the original tier, just
                     # push to "self" so it runs ASAP on resume. Conservatively
@@ -384,4 +429,16 @@ class RequestScheduler:
                 self._mh_dig_queue,
             ],
             notify=self._mh_notify,
+        )
+
+    async def _competitive_updates_worker(self) -> None:
+        await self._paced_worker(
+            name="competitive-updates",
+            pacer=self._cu_pacer,
+            queues_in_priority_order=lambda: [
+                self._cu_self_queue,
+                self._cu_task_queue,
+                self._cu_dig_queue,
+            ],
+            notify=self._cu_notify,
         )
