@@ -92,9 +92,8 @@ class ValorantStatsApp:
             self.bus,
             watermark_path=get_watermark_path(),
             ratelimit_offset=self.cfg.config.ratelimit_offset,
-            initial_limit=self.cfg.config.ratelimit_initial_limit,
-            sustained_limit=self.cfg.config.ratelimit_sustained_limit,
-            aggressive_limit=self.cfg.config.ratelimit_aggressive_limit,
+            match_details_interval_ms=self.cfg.config.match_details_interval_ms,
+            match_history_interval_ms=self.cfg.config.match_history_interval_ms,
         )
         server_base_url = self.cfg.config.server_base_url
         if not server_base_url:

@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
-from jwt import decode as jwt_decode, DecodeError  # pyright: ignore[reportUnknownVariableType] # PyJWT
+from jwt import decode as jwt_decode, DecodeError  # pyright: ignore[reportUnknownVariableType]
 from requests import Response
 
 from services.event_bus import EventBus, Event
@@ -60,13 +60,14 @@ from utils.exceptions import (
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-#NOTE: Do not move this into models.py, this is the main instance
+RATELIMIT_COOLDOWN: float = 65.0
+
 @dataclass
 class RiotSession:
     """Authenticated session to the local Riot API."""
 
     lockfile: LockfileData
-    ratelimit_timeout: int = 60
+    ratelimit_timeout: int = 65
     client: httpx.AsyncClient = field(init=False)
     region: RegionInfo = field(init=False)
     _base_urls: dict[str, str] = field(init=False)
@@ -130,6 +131,7 @@ class RiotSession:
         Returns:
             The raw httpx response.
         """
+        
         is_riot_endpoint: bool = type in ("pd", "glz", "shared")
 
         # Rate-limit: wait out any active cooldown for riot endpoints
@@ -161,9 +163,15 @@ class RiotSession:
                 json=payload,
             )
 
-        # Auth refresh: if 401, refresh entitlements and retry once
-        if is_riot_endpoint and response.status_code == 401:
-            logger.warning(f"Got 401 on {method} {endpoint.uri}, refreshing entitlements.")
+        # Auth refresh: 401, or 400 with BAD_CLAIMS (expired entitlements).
+        needs_refresh = is_riot_endpoint and response.status_code == 401
+        if is_riot_endpoint and response.status_code == 400:
+            try:
+                needs_refresh = response.json().get("errorCode") == "BAD_CLAIMS"  # pyright: ignore[reportAny]
+            except ValueError:
+                pass
+        if needs_refresh:
+            logger.warning(f"Got {response.status_code} on {method} {endpoint.uri}, refreshing entitlements.")
             await self._refresh_entitlements()
 
             response = await self.client.request(
@@ -178,7 +186,7 @@ class RiotSession:
 
     def _set_rate_limit_cooldown(self) -> None:
         """Set the rate-limit cooldown to 65 seconds from now (60s + 5s safety margin)."""
-        self._cooldown_until = time.monotonic() + 65.0
+        self._cooldown_until = time.monotonic() + RATELIMIT_COOLDOWN
 
     async def _wait_for_rate_limit(self) -> None:
         """If a rate-limit cooldown is active, sleep until it expires."""
@@ -190,7 +198,7 @@ class RiotSession:
     async def _refresh_entitlements(self, max_retries: int = 10) -> None:
         """Re-fetch entitlements and update session headers.
 
-        Uses a lock so that concurrent 401 responses only trigger one refresh.
+        Uses a lock so that concurrent 401/400 BAD_CLAIMS responses only trigger one refresh.
         Retries up to max_retries times with increasing delay on failure.
         """
         async with self._refresh_lock:
@@ -633,7 +641,7 @@ class RiotSession:
         if response.status_code != 200:
             return None, response.status_code
         try:
-            return response.json(), response.status_code  # pyright: ignore[reportAny]
+            return response.json(), response.status_code
         except ValueError:
             return None, response.status_code
 
@@ -669,7 +677,7 @@ class RiotSession:
         except ValueError:
             return None, None, response.status_code
         return MatchHistoryResponse(**raw), raw, response.status_code  # pyright: ignore[reportAny]
-    
+
     async def general_get_leaderboard(self, start_index: int = 0, size: int = 510, query: str | None = None) -> LeaderboardResponse:
         """Fetch the region's competitive leaderboard
 

@@ -77,6 +77,7 @@ _GAME_MODE_RULES: dict[str, _GameModeRules] = {
 }
 
 _MENU_IDLE_TIMEOUT: float = 60.0
+_USERINFO_POLL_INTERVAL: float = 60.0
 
 class GamestateHandler:
     """
@@ -94,9 +95,8 @@ class GamestateHandler:
         bus: EventBus,
         watermark_path: Path,
         ratelimit_offset: int = 60,
-        initial_limit: int = 6,
-        sustained_limit: int = 20,
-        aggressive_limit: int = 24,
+        match_details_interval_ms: int = 1700,
+        match_history_interval_ms: int = 2000,
     ) -> None:
         self.bus: EventBus = bus
         self._watermark_path: Path = watermark_path
@@ -105,9 +105,8 @@ class GamestateHandler:
         self._current_state: SessionLoopState | None = None
         self._pending_task: asyncio.Task[None] | None = None
         self._scheduler: RequestScheduler = RequestScheduler(
-            initial_limit=initial_limit,
-            sustained_limit=sustained_limit,
-            aggressive_limit=aggressive_limit,
+            match_details_interval_s=match_details_interval_ms / 1000.0,
+            match_history_interval_s=match_history_interval_ms / 1000.0,
         )
         self._match_collector: MatchCollector | None = None
         self._valorant_open: bool = False
@@ -120,6 +119,7 @@ class GamestateHandler:
         self._penalties_version: int | None = None
         self._mmr_version: int | None = None
         self._store_poll_task: asyncio.Task[None] | None = None
+        self._userinfo_poll_task: asyncio.Task[None] | None = None
         self._collector_paused: bool = False
         self._active_queue_id: str | None = None
         self._menu_idle_timer: asyncio.TimerHandle | None = None
@@ -158,7 +158,8 @@ class GamestateHandler:
         scheduler is paused for 60s to let other apps do their thing
         """
         self._session = data["session"]
-        self._scheduler.start(aggressive=not self._valorant_open)
+        self._scheduler.start()
+        # TODO: Also start history collector and Competitive Updates collector
         self._match_collector = MatchCollector(
             session=self._session,  # pyright: ignore[reportArgumentType]
             bus=self.bus,
@@ -169,6 +170,7 @@ class GamestateHandler:
         logger.info(f"Gamestate tracker ready for puuid {self._puuid}, match collector started")
 
         self._store_poll_task = asyncio.create_task(self._poll_store())
+        self._userinfo_poll_task = asyncio.create_task(self._poll_userinfo())
 
         # VALORANT_OPENED may have fired before the session was ready,
         # in which case the presence poll was skipped. Start it now.
@@ -425,7 +427,6 @@ class GamestateHandler:
 
         await self._wait_ratelimit_offset()
 
-        self._enqueue_general_checks()
         self._resume_collector(Event.COLLECTOR_RESUMED_NOT_MATCH_POINT)
 
     # ------------------- Boilerplate -------------------
@@ -473,20 +474,31 @@ class GamestateHandler:
         logger.info("Rate limit cooldown finished, collecting data")
 
     def _enqueue_general_checks(self) -> None:
-        """Enqueue all general-purpose data checks (low priority).
+        """Enqueue all general-purpose data checks onto the unlimited userinfo queue.
 
-        Also starts the match collector if it hasn't been started yet.
-        Match collection requests are enqueued after the general checks,
-        so player data is always fetched first.
+        These endpoints have no Riot rate-limit, so they run independently of
+        the paced match-details/match-history workers. Driven on a 60s timer
+        by `_poll_userinfo` starting at AUTH_SUCCESS.
         """
-        self._scheduler.enqueue_account(self._check_owned, "owned items")
-        self._scheduler.enqueue_account(self._check_loadout, "loadout")
-        self._scheduler.enqueue_account(self._check_xp, "xp")
-        self._scheduler.enqueue_account(self._check_penalties, "penalties")
-        self._scheduler.enqueue_account(self._check_mmr, "mmr")
+        self._scheduler.enqueue_userinfo(self._check_owned, "owned items")
+        self._scheduler.enqueue_userinfo(self._check_loadout, "loadout")
+        self._scheduler.enqueue_userinfo(self._check_xp, "xp")
+        self._scheduler.enqueue_userinfo(self._check_penalties, "penalties")
 
-        # Match collector is already running (started on AUTH_SUCCESS).
-        # Its self-scheduled requests interleave with these general checks.
+    async def _poll_userinfo(self) -> None:
+        """Re-enqueue all userinfo checks every minute.
+
+        Userinfo endpoints have no Riot rate-limit, so the cadence is decoupled
+        from game-state transitions — they refresh on a steady schedule whether
+        the player is in menus, agent select, mid-match, or AFK.
+        Each `_check_*` is a diff-and-emit no-op when nothing has changed.
+        """
+        while self._session is not None:
+            self._enqueue_general_checks()
+            try:
+                await asyncio.sleep(_USERINFO_POLL_INTERVAL)
+            except asyncio.CancelledError:
+                raise
 
     # ------------------- Proactive Collector Pause/Resume -------------------
 
@@ -598,9 +610,7 @@ class GamestateHandler:
         """
         logger.info(f"Menu idle timer fired (state={self._current_state}, paused={self._collector_paused})")
         if self._current_state == SessionLoopState.MENUS:
-            self._scheduler.set_rate_mode("aggressive")
             self._resume_collector(Event.COLLECTOR_RESUMED_IDLE)
-            self._enqueue_general_checks()
 
     # ------------------- Helpers -------------------
 
@@ -659,8 +669,7 @@ class GamestateHandler:
         self._last_activity_snapshot = None
         # Purge state-bound requests but keep the scheduler alive
         self._scheduler.on_state_change()
-        # Resume immediately so the match collector's general-queue requests keep flowing
-        self._scheduler.set_rate_mode("aggressive")
+        # Resume immediately so the match collector's paced requests keep flowing
         self._collector_paused = False
         self._scheduler.resume()
         self._cancel_pending_task()
@@ -684,6 +693,9 @@ class GamestateHandler:
         if self._store_poll_task and not self._store_poll_task.done():
             _ = self._store_poll_task.cancel()
             self._store_poll_task = None
+        if self._userinfo_poll_task and not self._userinfo_poll_task.done():
+            _ = self._userinfo_poll_task.cancel()
+            self._userinfo_poll_task = None
         if self._match_collector:
             self._match_collector.stop()
             self._match_collector = None
@@ -883,7 +895,7 @@ class GamestateHandler:
                     except Exception as e:
                         fut.set_exception(e)
 
-                self._scheduler.enqueue_account(_fetch_store, "store offers")
+                self._scheduler.enqueue_userinfo(_fetch_store, "store offers")
 
                 try:
                     store = await future

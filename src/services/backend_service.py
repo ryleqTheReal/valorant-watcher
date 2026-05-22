@@ -12,18 +12,6 @@ The backend uses two token scopes:
 
 Both scopes have their own access/refresh pair (access ~1d, refresh ~30d).
 
-Lifecycle driven by the event bus:
-
-- HARDWARE_COLLECTED -> stores the hwid_hash AND immediately acquires the
-  **app** token (refresh stored pair, or run Discord OAuth + /v1/login).
-  The app token is device-bound, not account-bound, so it lives for the
-  whole app lifetime regardless of which Riot account is signed in.
-- AUTH_SUCCESS       -> stores the RiotSession (used for shard lookup).
-- USERINFO_FETCHED   -> mints a **game** token bound to that account's
-  PUUID + shard via /v1/auth/game-token. Game tokens turn over every
-  time a different account logs in.
-- RSO_LOGOUT / SHUTDOWN -> tear down the proactive refresh task.
-
 A background task refreshes each access token at 75% of its lifetime so
 authenticated requests never see ACCESS_TOKEN_EXPIRED in normal operation.
 """
@@ -208,7 +196,7 @@ class BackendCommunicationService:
                 self._start_proactive_refresh()
                 logger.info(
                     f"App token refreshed. Access valid {self._app_tokens.access_expires_in()}s, "  # pyright: ignore[reportImplicitStringConcatenation]
-                    f"refresh valid {self._app_tokens.refresh_expires_in() / 86400}d."
+                    f"refresh valid {self._app_tokens.refresh_expires_in()}s."
                 )
                 return True
 
@@ -250,7 +238,7 @@ class BackendCommunicationService:
         """Make sure `self._game_tokens` is bound to (puuid, shard)."""
         assert self._app_tokens is not None
 
-        # Same account as before with a healthy game refresh — refresh it
+        # Same account as before with a healthy game refresh, refresh it
         # rather than burning a fresh mint.
         if (
             self._game_tokens is not None

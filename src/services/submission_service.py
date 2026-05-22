@@ -43,8 +43,18 @@ from services.backend_service import BackendCommunicationService
 from services.event_bus import Event, EventBus
 from services.gamestates import GamestateHandler
 from services.request_scheduler import RequestScheduler
-from utils.file_utils import get_pending_histories_path, get_pending_matches_path
-from utils.models import AccountXPResponse, IngameLoadoutsEvent, MatchDetailEvent, MatchHistoryEvent, OwnedItemsResponse, PenaltiesResponse
+from utils.file_utils import (
+    get_pending_histories_path,
+    get_pending_matches_path,
+)
+from utils.models import (
+    AccountXPResponse,
+    IngameLoadoutsEvent,
+    MatchDetailEvent,
+    MatchHistoryEvent,
+    OwnedItemsResponse,
+    PenaltiesResponse,
+)
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -53,8 +63,8 @@ logger: logging.Logger = logging.getLogger(__name__)
 # rely on _submit_with_split to halve further on 413.
 _MATCH_BATCH_MAX: int = 10
 _HISTORY_BATCH_MAX: int = 50
-_FLUSH_INTERVAL_SEC: float = 30.0
-_TASK_POLL_INTERVAL_SEC: float = 60.0
+_FLUSH_INTERVAL_SEC: float = 20.0
+_TASK_POLL_INTERVAL_SEC: float = 20.0
 _TASK_REFILL_THRESHOLD: int = 5
 _TASKS_NEEDED: int = 15
 _HISTORY_PAGE_SIZE: int = 20
@@ -286,7 +296,8 @@ class SubmissionService:
             except asyncio.TimeoutError:
                 pass
             try:
-                await self._flush_all()
+                await self._flush_matches()
+                await self._flush_histories()
             except Exception:  # noqa: BLE001
                 logger.exception("Periodic flush failed")
 
@@ -479,8 +490,9 @@ class SubmissionService:
             return
 
         if item_type == "match_details":
-            self._scheduler.enqueue_task(
+            self._scheduler.enqueue_match_details(
                 lambda mid=target, sh=shard: self._run_detail_task(mid, sh),
+                "task",
                 f"task detail {target[:8]}",
             )
         elif item_type == "match_history":
@@ -505,8 +517,9 @@ class SubmissionService:
         if status == 429:
             logger.info(f"Task detail {match_id[:8]} got 429; re-enqueueing")
             await asyncio.sleep(_RATELIMIT_RETRY_DELAY)
-            self._scheduler.enqueue_task(
+            self._scheduler.enqueue_match_details(
                 lambda mid=match_id, sh=shard: self._run_detail_task(mid, sh),
+                "task",
                 f"task detail {match_id[:8]} (retry)",
             )
             return
@@ -523,15 +536,17 @@ class SubmissionService:
             return
         asm = _HistoryAssembly(puuid=puuid, shard=shard, pending_pages=1)
         self._assemblies[puuid] = asm
-        self._scheduler.enqueue_task(
+        self._scheduler.enqueue_match_history(
             lambda a=asm, s=0, e=_HISTORY_PAGE_SIZE: self._run_history_page(a, s, e, is_probe=True),
+            "task",
             f"task history probe {puuid[:8]}",
         )
 
     def _enqueue_history_page(self, asm: _HistoryAssembly, start: int, end: int) -> None:
         asm.pending_pages += 1
-        self._scheduler.enqueue_task(
+        self._scheduler.enqueue_match_history(
             lambda a=asm, s=start, e=end: self._run_history_page(a, s, e, is_probe=False),
+            "task",
             f"task history page {asm.puuid[:8]} [{start},{end})",
         )
 
@@ -563,8 +578,9 @@ class SubmissionService:
         if status == 429:
             logger.info(f"History page {asm.puuid[:8]} [{start},{end}) got 429; re-enqueueing")
             await asyncio.sleep(_RATELIMIT_RETRY_DELAY)
-            self._scheduler.enqueue_task(
+            self._scheduler.enqueue_match_history(
                 lambda a=asm, s=start, e=end, p=is_probe: self._run_history_page(a, s, e, p),
+                "task",
                 f"task history page {asm.puuid[:8]} [{start},{end}) (retry)",
             )
             return

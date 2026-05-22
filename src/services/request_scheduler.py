@@ -1,21 +1,29 @@
 """
-Priority request scheduler for Riot API requests.
+Endpoint-aware request scheduler for Riot API requests.
 
-Manages four queues with different lifecycle behaviors:
+Three independent workers run in parallel, each draining its own queue(s):
 
-- **State queue** (highest): Requests bound to the current game state
-  (e.g. pregame match info, core-game data). Purged when the loop state changes.
-- **Account queue** (high): Account-info checks the local app cares about
-  (loadout, owned items, XP, penalties, MMR, store). Always runs before
-  server-issued tasks so we can establish/refresh local baselines.
-- **Task queue** (mid): Server-issued task requests from /v1/tasks.
-- **General queue** (low): Persistent background requests that survive state
-  changes (e.g. match-history sweep). Only processed once everything else is
-  empty.
+- **Unlimited worker**: drains the state queue first, then the userinfo
+  queue. No pacing; the underlying endpoints (presence, owned, loadout,
+  XP, penalties, store, task list, task ack, etc.) have no Riot
+  rate-limit. The state queue is purged on game-state transitions; the
+  userinfo queue persists across them. NOT affected by pause/resume —
+  the rationale for pausing is to yield rate-limit budget to other apps,
+  and these endpoints don't consume any.
 
-A single worker coroutine drains queues in priority order. The scheduler can
-be paused (e.g. during the ratelimit offset window) and resumed without
-losing queued work.
+- **match-details worker**: paces calls at a minimum interval (default
+  1700ms) measured between successive requests. Three sub-priority
+  queues: ``self`` (own freshly-completed match) > ``task`` (server-
+  issued task) > ``dig`` (background sweep). Strict priority, FIFO
+  within a tier. Pausable.
+
+- **match-history worker** — same shape as match-details, separate
+  pacer and separate sub-queues. Pausable.
+
+Pause/resume affects only the two paced workers. Stop tears down all
+three. Game-state transitions purge the state queue (and cancel the
+in-flight state request) but leave the paced queues intact, so a
+freshly-finished match still submits after the transition.
 """
 
 from __future__ import annotations
@@ -25,145 +33,36 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from collections.abc import Awaitable, Callable
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 
-class RateLimiter:
-    """Per-minute request rate limiter with three modes
+Priority = Literal["self", "task", "dig"]
 
-    Modes (set via ``set_mode``):
-    - aggressive: No other apps competing pre-game login, AFK in lobby for extended period
-      Uses the full safe budget 24 requests per min by default
-    - sustained: Normal operation while VALORANT is open which leaves
-      headroom for other apps 20 requests per min
-    - initial: First window after a gamestate change, other apps
-      are likely bursting and are close to having reached or have reached the rate limit
-      so we know that after a ratelimit the next minute allows for 6 requests per minute which
-      we use here
-      
-      then automatically slides to sustained
 
-    Call :meth:`wait_for_slot` before every outgoing request. It will
-    ``asyncio.sleep`` until the current window has enough budget.
+class IntervalPacer:
+    """Minimum-interval pacer for a single endpoint.
+
+    Records the monotonic timestamp of the last release and forces the
+    next caller to wait until ``min_interval_seconds`` has elapsed since
+    that timestamp.
     """
 
-    def __init__(
-        self,
-        initial_limit: int = 6,
-        sustained_limit: int = 20,
-        aggressive_limit: int = 24,
-        window_seconds: float = 60.0,
-    ) -> None:
-        self._initial_limit: int = initial_limit
-        self._sustained_limit: int = sustained_limit
-        self._aggressive_limit: int = aggressive_limit
-        self._window_seconds: float = window_seconds
+    def __init__(self, min_interval_seconds: float, label: str = "") -> None:
+        self._min_interval: float = min_interval_seconds
+        self._last_sent: float = 0.0
+        self._label: str = label
 
-        self._current_limit: int = initial_limit
-        self._request_count: int = 0
-        self._window_start: float = 0.0
-        self._is_first_window: bool = True
-        self._mode: str = "sustained"  # aggressive | sustained | initial
-
-    # ---- public ----
-
-    def set_mode(self, mode: str) -> None:
-        """Switch the rate limiter mode
-
-        Args:
-            mode: "aggressive" => no competition 
-                  "sustained" => normal
-                  "initial" => conservative first window after state change
-        """
-        self._mode = mode
-        self._request_count = 0
-        self._window_start = 0.0
-
-        match mode:
-            case "aggressive":
-                self._is_first_window = False
-                self._current_limit = self._aggressive_limit
-            case "sustained":
-                self._is_first_window = False
-                self._current_limit = self._sustained_limit
-            case "initial":
-                self._is_first_window = True
-                self._current_limit = self._initial_limit
-            case _:
-                pass
-
-        logger.debug(f"rate limiter mode: {mode} ({self._current_limit} req/window)")
-
-    def start_sustained(self) -> None:
-        """Start at full sustained rate, no competing apps yet"""
-        self.set_mode("sustained")
-
-    def start_aggressive(self) -> None:
-        """Start at aggressive rate, no other apps competing at all"""
-        self.set_mode("aggressive")
-
-    def reset(self) -> None:
-        """Resets the counter and ratelimit timer when gamestate changes.
-
-        Drops to the conservative initial limit for the first window
-        because other apps are likely competing for rate budget.
-        """
-        self.set_mode("initial")
-
-    async def wait_for_slot(self) -> None:
-        """Block until one request slot is available then consume it"""
+    async def acquire(self) -> None:
         now = time.monotonic()
-
-        # First call after reset start the window
-        if self._window_start == 0.0:
-            self._window_start = now
-            self._request_count = 0
-
-        # Roll the window forward if it has expired
-        self._slide_window_if_expired(now)
-
-        if self._request_count >= self._current_limit:
-            wait = self._window_seconds - (time.monotonic() - self._window_start)
-            if wait > 0:
-                logger.info(f"rate-limit reached {self._request_count}/{self._current_limit}: waiting {wait}s for next window")
-                await asyncio.sleep(wait)
-            self._slide_window()
-
-        self._request_count += 1
-        logger.debug(f"request {self._request_count}/{self._current_limit} in current window")
-
-    @property
-    def remaining(self) -> int:
-        """Returns the amount of requests remaining in the current window"""
-        
-        self._slide_window_if_expired(time.monotonic())
-        return max(0, self._current_limit - self._request_count) 
-
-    # -------- Internal Helpers --------
-
-    def _slide_window_if_expired(self, now: float) -> None:
-        """Checks whether the time window has expired, if it did, it slides the window"""
-        
-        elapsed = now - self._window_start
-        if elapsed >= self._window_seconds:
-            self._slide_window()
-
-    def _slide_window(self) -> None:
-        """Slides the window to the next time-frame
-
-        After the initial (conservative) window slides to sustained
-        since other apps have finished their burst by then
-        """
-        if self._is_first_window:
-            self._is_first_window = False
-            self._current_limit = self._sustained_limit
-            self._mode = "sustained"
-        self._window_start = time.monotonic()
-        self._request_count = 0
-        logger.debug(f"new rate-limit window started ({self._mode}: {self._current_limit} req)")
+        elapsed = now - self._last_sent
+        if self._last_sent > 0.0 and elapsed < self._min_interval:
+            wait = self._min_interval - elapsed
+            logger.debug(f"pacer[{self._label}] sleeping {wait:.3f}s")
+            await asyncio.sleep(wait)
+        self._last_sent = time.monotonic()
 
 
 @dataclass(slots=True)
@@ -175,47 +74,56 @@ class QueuedRequest:
 
 
 class RequestScheduler:
-    """Two-tier priority scheduler for API requests.
+    """Three-worker priority scheduler for API requests.
 
-    INGAME, PREGAME requests are executed first and purged on loopstate changes.
-    General requests (matches, player data etc.) persist across state changes and run when the state
-    queue is empty.
+    See module docstring for the queue/worker layout. Public surface:
 
-    The scheduler can be paused (e.g. during ratelimit offset waits)
-    and resumed.  While paused, no requests are processed.
+    - ``enqueue_state(execute, label)`` — unlimited, purged on state change
+    - ``enqueue_userinfo(execute, label)`` — unlimited, persistent
+    - ``enqueue_match_details(execute, priority, label)`` — paced
+    - ``enqueue_match_history(execute, priority, label)`` — paced
+    - ``pause()`` / ``resume()`` — affects paced workers only
+    - ``on_state_change()`` — purges state queue, cancels in-flight state req
+    - ``start()`` / ``stop()`` — lifecycle
     """
 
     def __init__(
         self,
-        initial_limit: int = 6,
-        sustained_limit: int = 20,
-        aggressive_limit: int = 24,
+        match_details_interval_s: float,
+        match_history_interval_s: float,
     ) -> None:
+        # Unlimited worker queues
         self._state_queue: deque[QueuedRequest] = deque()
-        self._account_queue: deque[QueuedRequest] = deque()
-        self._task_queue: deque[QueuedRequest] = deque()
-        self._general_queue: deque[QueuedRequest] = deque()
+        self._userinfo_queue: deque[QueuedRequest] = deque()
 
-        # Controls whether the worker is allowed to process requests
-        self._active: asyncio.Event = asyncio.Event()
-        self._active.set()
+        # match-details sub-priority queues
+        self._md_self_queue: deque[QueuedRequest] = deque()
+        self._md_task_queue: deque[QueuedRequest] = deque()
+        self._md_dig_queue: deque[QueuedRequest] = deque()
 
-        # Wakes the worker when new work arrives or state changes
-        self._notify: asyncio.Event = asyncio.Event()
+        # match-history sub-priority queues
+        self._mh_self_queue: deque[QueuedRequest] = deque()
+        self._mh_task_queue: deque[QueuedRequest] = deque()
+        self._mh_dig_queue: deque[QueuedRequest] = deque()
+
+        # Pacers
+        self._md_pacer: IntervalPacer = IntervalPacer(match_details_interval_s, "match-details")
+        self._mh_pacer: IntervalPacer = IntervalPacer(match_history_interval_s, "match-history")
+
+        # Per-worker wake-up signals
+        self._unlimited_notify: asyncio.Event = asyncio.Event()
+        self._md_notify: asyncio.Event = asyncio.Event()
+        self._mh_notify: asyncio.Event = asyncio.Event()
+
+        # Paced-worker pause gate (shared by md + mh; unlimited ignores it)
+        self._paced_active: asyncio.Event = asyncio.Event()
+        self._paced_active.set()
 
         self._running: bool = False
-        self._worker_task: asyncio.Task[None] | None = None
+        self._workers: list[asyncio.Task[None]] = []
 
-        # Tracks the currently executing request so we can cancel it
-        self._current_is_state: bool = False
-        self._current_task: asyncio.Task[Any] | None = None  # pyright: ignore[reportExplicitAny]
-
-        # Rate limiter enforces per-minute request budgets
-        self._rate_limiter: RateLimiter = RateLimiter(
-            initial_limit=initial_limit,
-            sustained_limit=sustained_limit,
-            aggressive_limit=aggressive_limit,
-        )
+        # In-flight tracking for state-request cancellation on state change
+        self._current_state_task: asyncio.Task[Any] | None = None  # pyright: ignore[reportExplicitAny]
 
     # ------------------- Public API -------------------
 
@@ -224,184 +132,256 @@ class RequestScheduler:
         return len(self._state_queue)
 
     @property
-    def general_queue_size(self) -> int:
-        return len(self._general_queue)
+    def userinfo_queue_size(self) -> int:
+        return len(self._userinfo_queue)
+
+    @property
+    def match_details_task_queue_size(self) -> int:
+        return len(self._md_task_queue)
+
+    @property
+    def match_history_task_queue_size(self) -> int:
+        return len(self._mh_task_queue)
 
     @property
     def task_queue_size(self) -> int:
-        return len(self._task_queue)
+        """Combined count of outstanding ``task``-priority paced requests."""
+        return len(self._md_task_queue) + len(self._mh_task_queue)
 
-    @property
-    def account_queue_size(self) -> int:
-        return len(self._account_queue)
-
-    def start(self, aggressive: bool = False) -> None:
-        """Start the worker loop, no-op if already running
-
-        Args:
-            aggressive: If True, start at the aggressive rate (no other
-                        apps competing), otherwise use sustained rate
-        """
+    def start(self) -> None:
+        """Start the three worker loops. No-op if already running."""
         if self._running:
             return
         self._running = True
-        self._active.set()
-        if aggressive:
-            self._rate_limiter.start_aggressive()
-        else:
-            self._rate_limiter.start_sustained()
-        self._worker_task = asyncio.create_task(self._worker())
-        logger.info("Request scheduler started")
+        self._paced_active.set()
+        self._workers = [
+            asyncio.create_task(self._unlimited_worker()),
+            asyncio.create_task(self._match_details_worker()),
+            asyncio.create_task(self._match_history_worker()),
+        ]
+        logger.info("Request scheduler started (3 workers)")
 
     def stop(self) -> None:
-        """Stop the worker and purge all queues."""
+        """Stop all workers and purge every queue."""
         self._running = False
-        self._wake()
-        if self._worker_task and not self._worker_task.done():
-            _ = self._worker_task.cancel()
-        self._worker_task = None
-        self._cancel_current()
+        # Wake every worker so they re-check _running and exit
+        self._unlimited_notify.set()
+        self._md_notify.set()
+        self._mh_notify.set()
+        self._paced_active.set()  # unblock any pause waits so the worker can exit
+        for w in self._workers:
+            if not w.done():
+                _ = w.cancel()
+        self._workers = []
+        self._cancel_current_state()
         self._state_queue.clear()
-        self._account_queue.clear()
-        self._task_queue.clear()
-        self._general_queue.clear()
+        self._userinfo_queue.clear()
+        self._md_self_queue.clear()
+        self._md_task_queue.clear()
+        self._md_dig_queue.clear()
+        self._mh_self_queue.clear()
+        self._mh_task_queue.clear()
+        self._mh_dig_queue.clear()
         logger.info("Request scheduler stopped")
 
-    def set_rate_mode(self, mode: str) -> None:
-        """Switch the rate limiter mode: 'aggressive', 'sustained', or 'initial'."""
-        self._rate_limiter.set_mode(mode)
-
     def pause(self) -> None:
-        """Pause request processing (e.g. during ratelimit offset)."""
-        self._active.clear()
-        self._wake()
+        """Pause the paced workers. Unlimited worker keeps draining."""
+        if self._paced_active.is_set():
+            logger.debug("Paced workers paused")
+        self._paced_active.clear()
 
     def resume(self) -> None:
-        """Resume request processing."""
-        self._active.set()
-        self._wake()
+        """Resume the paced workers."""
+        if not self._paced_active.is_set():
+            logger.debug("Paced workers resumed")
+        self._paced_active.set()
+        self._md_notify.set()
+        self._mh_notify.set()
 
     def on_state_change(self) -> None:
-        """Handle a game state transition.
+        """Handle a game-state transition.
 
-        Pauses processing, purges all state-bound requests, and cancels
-        any in-flight state request.  General queue is left untouched.
+        Purges all state-bound requests and cancels the in-flight state
+        request (if any). Userinfo and paced queues are untouched, so a
+        freshly-completed match still submits after the transition.
         """
-        self.pause()
         self._purge_state_queue()
-        self._rate_limiter.reset()
-        if self._current_is_state:
-            self._cancel_current()
+        self._cancel_current_state()
 
     def enqueue_state(
         self,
         execute: Callable[[], Awaitable[Any]],  # pyright: ignore[reportExplicitAny]
         label: str = "",
     ) -> None:
-        """Add a state-bound request (high priority, purged on state change)."""
         self._state_queue.append(QueuedRequest(execute=execute, label=label))
         logger.debug(f"Enqueued state request: {label}")
-        self._wake()
+        self._unlimited_notify.set()
 
-    def enqueue_account(
+    def enqueue_userinfo(
         self,
         execute: Callable[[], Awaitable[Any]],  # pyright: ignore[reportExplicitAny]
         label: str = "",
     ) -> None:
-        """Add an account-info request (high priority, pre-empts tasks/general, survives state changes)."""
-        self._account_queue.append(QueuedRequest(execute=execute, label=label))
-        logger.debug(f"Enqueued account request: {label}")
-        self._wake()
+        self._userinfo_queue.append(QueuedRequest(execute=execute, label=label))
+        logger.debug(f"Enqueued userinfo request: {label}")
+        self._unlimited_notify.set()
 
-    def enqueue_task(
+    def enqueue_match_details(
         self,
         execute: Callable[[], Awaitable[Any]],  # pyright: ignore[reportExplicitAny]
+        priority: Priority,
         label: str = "",
     ) -> None:
-        """Add a server-task request (mid priority, pre-empts general, survives state changes)."""
-        self._task_queue.append(QueuedRequest(execute=execute, label=label))
-        logger.debug(f"Enqueued task request: {label}")
-        self._wake()
+        self._priority_queue_md(priority).append(QueuedRequest(execute=execute, label=label))
+        logger.debug(f"Enqueued match-details({priority}) request: {label}")
+        self._md_notify.set()
 
-    def enqueue_general(
+    def enqueue_match_history(
         self,
         execute: Callable[[], Awaitable[Any]],  # pyright: ignore[reportExplicitAny]
+        priority: Priority,
         label: str = "",
     ) -> None:
-        """Add a general request (low priority, survives state changes)."""
-        self._general_queue.append(QueuedRequest(execute=execute, label=label))
-        logger.debug(f"Enqueued general request: {label}")
-        self._wake()
+        self._priority_queue_mh(priority).append(QueuedRequest(execute=execute, label=label))
+        logger.debug(f"Enqueued match-history({priority}) request: {label}")
+        self._mh_notify.set()
 
     # ------------------- Internal -------------------
 
-    def _wake(self) -> None:
-        """Signal the worker to re-check state."""
-        self._notify.set()
+    def _priority_queue_md(self, priority: Priority) -> deque[QueuedRequest]:
+        match priority:
+            case "self":
+                return self._md_self_queue
+            case "task":
+                return self._md_task_queue
+            case "dig":
+                return self._md_dig_queue
 
-    def _cancel_current(self) -> None:
-        """Cancel the currently executing request task."""
-        if self._current_task and not self._current_task.done():
-            _ = self._current_task.cancel()
-            logger.debug("Cancelled in-flight request")
+    def _priority_queue_mh(self, priority: Priority) -> deque[QueuedRequest]:
+        match priority:
+            case "self":
+                return self._mh_self_queue
+            case "task":
+                return self._mh_task_queue
+            case "dig":
+                return self._mh_dig_queue
 
-    def _try_dequeue(self) -> tuple[QueuedRequest, bool] | None:
-        """Get the next request, preferring state queue.
-
-        Returns:
-            (request, is_state) or None if both queues are empty.
-        """
-        if self._state_queue:
-            return self._state_queue.popleft(), True
-        if self._account_queue:
-            return self._account_queue.popleft(), False
-        if self._task_queue:
-            return self._task_queue.popleft(), False
-        if self._general_queue:
-            return self._general_queue.popleft(), False
-        return None
+    def _cancel_current_state(self) -> None:
+        if self._current_state_task and not self._current_state_task.done():
+            _ = self._current_state_task.cancel()
+            logger.debug("Cancelled in-flight state request")
 
     def _purge_state_queue(self) -> None:
-        """Discard all pending state-bound requests."""
         count = len(self._state_queue)
         self._state_queue.clear()
         if count:
             logger.info(f"Purged {count} state-bound request(s)")
 
-    async def _worker(self) -> None:
-        """Main worker loop: process requests in priority order."""
-        logger.debug("Scheduler worker started")
+    @staticmethod
+    def _pop_first_nonempty(queues: list[deque[QueuedRequest]]) -> QueuedRequest | None:
+        for q in queues:
+            if q:
+                return q.popleft()
+        return None
 
+    async def _unlimited_worker(self) -> None:
+        """Drains state then userinfo. No pacing, no pause gate."""
+        logger.debug("Unlimited worker started")
         while self._running:
-            # Block while paused
-            if not self._active.is_set():
-                _ = await self._active.wait()
-                continue
+            # State takes precedence over userinfo
+            item: QueuedRequest | None
+            from_state: bool = False
+            if self._state_queue:
+                item = self._state_queue.popleft()
+                from_state = True
+            elif self._userinfo_queue:
+                item = self._userinfo_queue.popleft()
+            else:
+                item = None
 
-            # Try to get next request
-            result = self._try_dequeue()
-            if result is None:
-                # Nothing to do, wait for a wake-up signal
-                self._notify.clear()
-                _ = await self._notify.wait()
+            if item is None:
+                self._unlimited_notify.clear()
+                _ = await self._unlimited_notify.wait()
                 continue
-
-            item, is_state = result
-            self._current_is_state = is_state
-            queue_type = "state" if is_state else "general"
 
             try:
-                # Wait for a rate-limit slot before executing
-                await self._rate_limiter.wait_for_slot()
-                logger.debug(f"Executing {queue_type} request: {item.label}")
-                self._current_task = asyncio.create_task(item.execute())  # pyright: ignore[reportArgumentType]
-                _ = await self._current_task  # pyright: ignore[reportAny]
+                task: asyncio.Task[Any] = asyncio.create_task(item.execute())  # pyright: ignore[reportExplicitAny]
+                if from_state:
+                    self._current_state_task = task
+                logger.debug(f"Executing {'state' if from_state else 'userinfo'} request: {item.label}")
+                _ = await task  # pyright: ignore[reportAny]
             except asyncio.CancelledError:
                 logger.debug(f"Request cancelled: {item.label}")
+                if not self._running:
+                    break
             except Exception as e:
                 logger.warning(f"Request failed ({item.label}): {e}")
             finally:
-                self._current_task = None
-                self._current_is_state = False
+                if from_state:
+                    self._current_state_task = None
+        logger.debug("Unlimited worker stopped")
 
-        logger.debug("Scheduler worker stopped")
+    async def _paced_worker(
+        self,
+        name: str,
+        pacer: IntervalPacer,
+        queues_in_priority_order: Callable[[], list[deque[QueuedRequest]]],
+        notify: asyncio.Event,
+    ) -> None:
+        logger.debug(f"{name} worker started")
+        while self._running:
+            # Honor pause
+            if not self._paced_active.is_set():
+                _ = await self._paced_active.wait()
+                continue
+
+            item = self._pop_first_nonempty(queues_in_priority_order())
+            if item is None:
+                notify.clear()
+                _ = await notify.wait()
+                continue
+
+            try:
+                await pacer.acquire()
+                # Re-check pause after acquire (it may have flipped while sleeping)
+                if not self._paced_active.is_set():
+                    # Put item back at the front of its priority tier — simplest
+                    # is to re-enqueue at the head of the highest-priority queue
+                    # it would belong to. Since we lost the original tier, just
+                    # push to "self" so it runs ASAP on resume. Conservatively
+                    # safe because pause-during-acquire is rare.
+                    queues_in_priority_order()[0].appendleft(item)
+                    continue
+                logger.debug(f"Executing {name} request: {item.label}")
+                _ = await item.execute()  # pyright: ignore[reportAny]
+            except asyncio.CancelledError:
+                logger.debug(f"Request cancelled: {item.label}")
+                if not self._running:
+                    break
+            except Exception as e:
+                logger.warning(f"Request failed ({item.label}): {e}")
+        logger.debug(f"{name} worker stopped")
+
+    async def _match_details_worker(self) -> None:
+        await self._paced_worker(
+            name="match-details",
+            pacer=self._md_pacer,
+            queues_in_priority_order=lambda: [
+                self._md_self_queue,
+                self._md_task_queue,
+                self._md_dig_queue,
+            ],
+            notify=self._md_notify,
+        )
+
+    async def _match_history_worker(self) -> None:
+        await self._paced_worker(
+            name="match-history",
+            pacer=self._mh_pacer,
+            queues_in_priority_order=lambda: [
+                self._mh_self_queue,
+                self._mh_task_queue,
+                self._mh_dig_queue,
+            ],
+            notify=self._mh_notify,
+        )

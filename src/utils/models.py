@@ -87,10 +87,9 @@ class AppConfig:
     collect_interval: int = 60
     enable_data_sending: bool = True
     ratelimit_timeout: int = 60
-    ratelimit_offset: int = 60              # Seconds to wait after state change before making API calls
-    ratelimit_initial_limit: int = 6        # Max requests in the first minute after offset ends
-    ratelimit_sustained_limit: int = 20     # Max requests per minute after the first window
-    ratelimit_aggressive_limit: int = 24    # Max requests per minute when no other apps are competing (pre-game, AFK)
+    ratelimit_offset: int = 60                  # Seconds to wait after state change before making API calls
+    match_details_interval_ms: int = 1700       # Min ms between subsequent /match-details requests (server recovers 1 every 1700ms)
+    match_history_interval_ms: int = 2000       # Min ms between subsequent /match-history requests (TBD: replace once measured)
 
     @classmethod
     def from_config_dict(cls, data: dict[str, object]) -> AppConfig:

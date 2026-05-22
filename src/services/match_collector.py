@@ -159,24 +159,27 @@ class MatchCollector:
         # Drain detail queue for fresh/legacy phases
         if self._phase in ("fresh", "legacy") and self._detail_queue:
             match_id: str = self._detail_queue.popleft()
-            self._scheduler.enqueue_general(
+            self._scheduler.enqueue_match_details(
                 lambda mid=match_id: self._fetch_detail(mid),
+                "self",
                 f"detail {match_id[:8]}",
             )
             return
 
         match self._phase:
             case "fresh":
-                self._scheduler.enqueue_general(
+                self._scheduler.enqueue_match_history(
                     self._fetch_fresh_page,
+                    "self",
                     f"fresh page {self._page_index // PAGE_SIZE}",
                 )
             case "legacy":
                 if self._account.legacy_complete:
                     self._transition_to_dig()
                 else:
-                    self._scheduler.enqueue_general(
+                    self._scheduler.enqueue_match_history(
                         self._fetch_legacy_page,
+                        "self",
                         f"legacy page {self._page_index // PAGE_SIZE}",
                     )
             case "dig":
@@ -443,8 +446,9 @@ class MatchCollector:
         self._watermark.dig_visited.add(target)
 
         logger.debug(f"DFS walk starting from root {target[:8]}")
-        self._scheduler.enqueue_general(
+        self._scheduler.enqueue_match_history(
             lambda p=target: self._dig_fetch_history(p),
+            "dig",
             f"dig history {target[:8]}",
         )
 
@@ -499,8 +503,9 @@ class MatchCollector:
 
         if self._dig_detail_queue:
             match_id: str = self._dig_detail_queue.popleft()
-            self._scheduler.enqueue_general(
+            self._scheduler.enqueue_match_details(
                 lambda mid=match_id: self._dig_fetch_detail(mid),
+                "dig",
                 f"dig detail {match_id[:8]}",
             )
         else:
@@ -578,8 +583,9 @@ class MatchCollector:
         self._watermark.dig_visited.add(next_player)
 
         logger.debug(f"DFS continuing: {match_id[:8]} => player {next_player[:8]}")
-        self._scheduler.enqueue_general(
+        self._scheduler.enqueue_match_history(
             lambda p=next_player: self._dig_fetch_history(p),
+            "dig",
             f"dig history {next_player[:8]}",
         )
 
