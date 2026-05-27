@@ -6,5 +6,6 @@
     "ratelimit_timeout": 60,
     "ratelimit_offset": 60,
     "match_details_interval_ms": 1700,
-    "match_history_interval_ms": 2125
+    "match_history_interval_ms": 2125,
+    "competitive_updates_interval_ms": 2050
 }

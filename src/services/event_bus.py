@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 class Event(Enum):
     """All events that can occur in the system."""
-
+    
+    STARTUP = "STARTUP"                         # Watcher process started
     RSO_LOGIN = "RSO_LOGIN"                     # Riot Client logged in (lockfile + RSO 200)
     RSO_LOGOUT = "RSO_LOGOUT"                   # Riot Client logged out (RSO non-200 / lockfile gone)
     VALORANT_OPENED = "VALORANT_OPENED"         # Valorant process detected, lockfile read
@@ -27,6 +28,8 @@ class Event(Enum):
     AUTH_FAILED = "AUTH_FAILED"                 # Riot auth failed
     MATCH_STARTED = "MATCH_STARTED"             # New match detected
     MATCH_ENDED = "MATCH_ENDED"                 # Match finished
+    PREGAME_STARTED = "PREGAME_STARTED"         # Entered agent-select / pregame
+    PREGAME_ENDED = "PREGAME_ENDED"             # Left pregame
     DATA_COLLECTED = "DATA_COLLECTED"           # New stats data collected
     DATA_SENT = "DATA_SENT"                     # Data sent to remote server
     DATA_QUEUED = "DATA_QUEUED"                 # Data queued locally (offline)

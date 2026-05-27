@@ -69,6 +69,7 @@ try:
     from services.backend_service import BackendCommunicationService
     from services.gamesocket import GameSocketHandler
     from services.gamestates import GamestateHandler
+    from services.session_service import SessionService
     from services.submission_service import SubmissionService
     from services.config_manager import ConfigManager
     from services.hardware_service import collect_and_emit as collect_hardware
@@ -103,6 +104,7 @@ class ValorantStatsApp:
             self.bus,
             server_base_url=server_base_url,
         )
+        self.session: SessionService = SessionService(self.bus, self.backend)
         self.submission: SubmissionService = SubmissionService(
             self.bus,
             self.backend,
@@ -133,6 +135,8 @@ class ValorantStatsApp:
         logger.info("=" * 60)
         logger.info("  Valorant Stats Collector started")
         logger.info("=" * 60)
+
+        _ = await self.bus.emit(Event.STARTUP)
 
         shutdown_event = asyncio.Event()
         loop = asyncio.get_running_loop()

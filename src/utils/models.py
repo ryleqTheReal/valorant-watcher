@@ -1435,6 +1435,7 @@ class MatchDetailEvent:
     match_id: str
     riot_status: int
     match_details: dict[str, Any] | None
+    game_start_millis: int | None = None
 
 
 @dataclass

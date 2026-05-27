@@ -69,7 +69,7 @@ _COMP_UPDATE_BATCH_MAX: int = 50
 _FLUSH_INTERVAL_SEC: float = 20.0
 _TASK_POLL_INTERVAL_SEC: float = 20.0
 _TASK_REFILL_THRESHOLD: int = 5
-_TASKS_NEEDED: int = 15
+_TASKS_NEEDED: int = 45
 _RATELIMIT_RETRY_DELAY: float = 5.0  # local cushion before re-enqueueing a 429
 
 
@@ -89,9 +89,9 @@ class SubmissionService:
 
         self._client: httpx.AsyncClient = httpx.AsyncClient(timeout=20.0)
 
-        self._matches_buffer: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
-        self._histories_buffer: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
-        self._comp_updates_buffer: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
+        self._matches_buffer: list[bytes] = []
+        self._histories_buffer: list[bytes] = []
+        self._comp_updates_buffer: list[bytes] = []
         self._buffer_lock: asyncio.Lock = asyncio.Lock()
         # Serialize submission per endpoint so the periodic flush and the
         # size-cap flush cannot both drain the pending file at the same time.
@@ -109,6 +109,13 @@ class SubmissionService:
         self._flush_task: asyncio.Task[None] | None = None
         self._task_task: asyncio.Task[None] | None = None
         self._cancelled: asyncio.Event = asyncio.Event()
+
+        # Count of server tasks still in flight (queued in the scheduler OR
+        # mid-assembly). The scheduler's `task_queue_size` only reflects the
+        # queued portion, so histories/comp-updates (which run as multi-page
+        # assemblies driven by their own asyncio.create_task) wouldn't be
+        # counted there and would let us double-claim.
+        self._outstanding_tasks: int = 0
 
         self._register()
 
@@ -155,15 +162,29 @@ class SubmissionService:
         if ev.riot_status == 0:
             logger.debug(f"Dropping match-detail {ev.match_id[:8]} with sentinel riot_status=0")
             return
-        item: dict[str, Any] = {  # pyright: ignore[reportExplicitAny]
+        # game_start_millis is required for backend expiry pruning.
+        # Prefer the value threaded from the source (history/comp-update
+        # entry) so non-200 responses still carry a timestamp.
+        game_start_millis: int | None = ev.game_start_millis
+        if game_start_millis is None and isinstance(ev.match_details, dict):
+            match_info = ev.match_details.get("matchInfo")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            if isinstance(match_info, dict):
+                raw = match_info.get("gameStartMillis")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+                if isinstance(raw, int) and raw > 0:
+                    game_start_millis = raw
+        if game_start_millis is None:
+            logger.debug(f"Dropping match-detail {ev.match_id[:8]}: no game_start_millis")
+            return
+        item_bytes: bytes = json.dumps({
             "match_id": ev.match_id,
             "shard": ev.shard,
             "riot_status": ev.riot_status,
+            "game_start_millis": game_start_millis,
             "match_details": ev.match_details,
-        }
+        }, separators=(",", ":")).encode()
         should_flush: bool = False
         async with self._buffer_lock:
-            self._matches_buffer.append(item)
+            self._matches_buffer.append(item_bytes)
             should_flush = len(self._matches_buffer) >= _MATCH_BATCH_MAX
         if should_flush:
             _ = asyncio.create_task(self._flush_matches())
@@ -177,16 +198,16 @@ class SubmissionService:
         if ev.riot_status == 0:
             logger.debug(f"Dropping comp-update {ev.puuid[:8]} with sentinel riot_status=0")
             return
-        item: dict[str, Any] = {  # pyright: ignore[reportExplicitAny]
+        item_bytes: bytes = json.dumps({
             "shard": ev.shard,
             "puuid": ev.puuid,
             "riot_status": ev.riot_status,
             "fetch_time": ev.fetch_time_ms,
             "competitive_updates": ev.competitive_updates,
-        }
+        }, separators=(",", ":")).encode()
         should_flush: bool = False
         async with self._buffer_lock:
-            self._comp_updates_buffer.append(item)
+            self._comp_updates_buffer.append(item_bytes)
             should_flush = len(self._comp_updates_buffer) >= _COMP_UPDATE_BATCH_MAX
         if should_flush:
             _ = asyncio.create_task(self._flush_comp_updates())
@@ -195,16 +216,16 @@ class SubmissionService:
         if ev.riot_status == 0:
             logger.debug(f"Dropping match-history {ev.puuid[:8]} with sentinel riot_status=0")
             return
-        item: dict[str, Any] = {  # pyright: ignore[reportExplicitAny]
+        item_bytes: bytes = json.dumps({
             "puuid": ev.puuid,
             "shard": ev.shard,
             "riot_status": ev.riot_status,
             "match_history": ev.match_history,
             "fetch_time": ev.fetch_time_ms,
-        }
+        }, separators=(",", ":")).encode()
         should_flush: bool = False
         async with self._buffer_lock:
-            self._histories_buffer.append(item)
+            self._histories_buffer.append(item_bytes)
             should_flush = len(self._histories_buffer) >= _HISTORY_BATCH_MAX
         if should_flush:
             _ = asyncio.create_task(self._flush_histories())
@@ -336,8 +357,8 @@ class SubmissionService:
                     return
                 batch = self._matches_buffer[:_MATCH_BATCH_MAX]
                 self._matches_buffer = self._matches_buffer[_MATCH_BATCH_MAX:]
-            if not await self._post_batch("/v1/matches", batch):
-                self._spill(self._pending_matches_path, batch)
+            if not await self._post_batch_raw("/v1/matches", batch):
+                self._spill_raw(self._pending_matches_path, batch)
 
     async def _flush_histories(self) -> None:
         async with self._history_submit_lock:
@@ -347,8 +368,8 @@ class SubmissionService:
                     return
                 batch = self._histories_buffer[:_HISTORY_BATCH_MAX]
                 self._histories_buffer = self._histories_buffer[_HISTORY_BATCH_MAX:]
-            if not await self._post_batch("/v1/histories", batch):
-                self._spill(self._pending_histories_path, batch)
+            if not await self._post_batch_raw("/v1/histories", batch):
+                self._spill_raw(self._pending_histories_path, batch)
 
     async def _flush_comp_updates(self) -> None:
         async with self._comp_update_submit_lock:
@@ -362,24 +383,30 @@ class SubmissionService:
                     return
                 batch = self._comp_updates_buffer[:_COMP_UPDATE_BATCH_MAX]
                 self._comp_updates_buffer = self._comp_updates_buffer[_COMP_UPDATE_BATCH_MAX:]
-            if not await self._post_batch("/v1/competitive-updates", batch):
-                self._spill(self._pending_comp_updates_path, batch)
+            if not await self._post_batch_raw("/v1/competitive-updates", batch):
+                self._spill_raw(self._pending_comp_updates_path, batch)
 
-    async def _post_batch(self, path: str, batch: list[dict[str, Any]]) -> bool:
+    async def _post_batch_raw(self, path: str, batch: list[bytes]) -> bool:
+        """POST a batch of pre-serialized JSON items.
+
+        Assembles a JSON array from the raw bytes without round-tripping
+        through Python dicts, keeping memory usage flat.
+        """
         if not batch:
             return True
         headers = self._backend.game_headers
         if headers is None:
             logger.info(f"Backend game token unavailable; spilling {len(batch)} item(s) to disk ({path})")
             return False
+        body = b"[" + b",".join(batch) + b"]"
         try:
             response = await self._client.post(
                 f"{self._backend.base_url}{path}",
-                json=batch,
-                headers=headers,
+                content=body,
+                headers={**headers, "Content-Type": "application/json"},
             )
         except httpx.HTTPError as e:
-            logger.warning(f"POST {path} transport error ({len(batch)} item(s)): {e}")
+            logger.warning(f"POST {path} transport error ({len(batch)} item(s)): {type(e).__name__}: {e!r}")
             return False
         if response.status_code != 202:
             logger.warning(
@@ -390,91 +417,116 @@ class SubmissionService:
         return True
 
     @staticmethod
-    def _spill(path: Path, batch: list[dict[str, Any]]) -> None:
+    def _spill_raw(path: Path, batch: list[bytes]) -> None:
+        """Spill pre-serialized JSON items to a JSONL file."""
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as f:
+            with path.open("ab") as f:
                 for item in batch:
-                    _ = f.write(json.dumps(item, separators=(",", ":")) + "\n")
+                    f.write(item)
+                    f.write(b"\n")
             logger.info(f"Spilled {len(batch)} item(s) to {path}")
         except OSError as e:
             logger.warning(f"Could not spill {len(batch)} item(s) to {path}: {e}")
 
     async def _drain_pending(self, path: Path, endpoint: str, batch_max: int) -> None:
+        """Drain pending items from the spill file in bounded chunks.
+
+        Reads at most *batch_max* valid entries per iteration to keep peak
+        memory bounded regardless of how large the spill file has grown.
+        Keeps lines as raw bytes to avoid parsing large JSON into Python
+        dicts. Only lightweight field checks are done via partial parse.
+        Loops until the file is empty or a POST fails.
+        """
         if self._backend.game_headers is None:
             return
-        if not path.exists():
-            return
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError as e:
-            logger.warning(f"Could not read pending file {path}: {e}")
-            return
 
-        items: list[dict[str, Any]] = []
-        dropped_sentinel = 0
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        is_matches = endpoint == "/v1/matches"
+
+        while path.exists():
+            batch: list[bytes] = []
+            file_exhausted: bool = False
+
             try:
-                entry: dict[str, Any] = json.loads(line)  # pyright: ignore[reportAny]
-            except json.JSONDecodeError:
-                logger.warning(f"Dropping malformed pending entry in {path.name}")
-                continue
-            if entry.get("riot_status") == 0:
-                dropped_sentinel += 1
-                continue
-            items.append(entry)
-        if dropped_sentinel:
-            logger.warning(
-                f"Dropped {dropped_sentinel} pending entr(ies) from {path.name} with sentinel riot_status=0"
-            )
+                with path.open("rb") as f:
+                    while True:
+                        raw_line = f.readline()
+                        if not raw_line:
+                            file_exhausted = True
+                            break
+                        stripped = raw_line.strip()
+                        if not stripped:
+                            continue
+                        # Lightweight validation without full parse
+                        try:
+                            probe: dict[str, Any] = json.loads(stripped)  # pyright: ignore[reportAny]
+                        except json.JSONDecodeError:
+                            logger.warning(f"Dropping malformed pending entry in {path.name}")
+                            continue
+                        if probe.get("riot_status") == 0:
+                            continue
+                        if is_matches and not probe.get("game_start_millis"):
+                            continue
+                        del probe
+                        batch.append(stripped)
+                        if len(batch) >= batch_max:
+                            break
 
-        if not items:
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            return
-
-        logger.info(f"Draining {len(items)} pending item(s) from {path.name}")
-        idx = 0
-        while idx < len(items):
-            chunk = items[idx:idx + batch_max]
-            if not await self._post_batch(endpoint, chunk):
-                # Server still rejecting or unreachable; rewrite the unsent tail.
-                remaining = items[idx:]
-                self._rewrite_pending(path, remaining)
+                    tail = f.read() if not file_exhausted else b""
+            except OSError as e:
+                logger.warning(f"Could not read pending file {path}: {e}")
                 return
-            idx += batch_max
 
-        try:
-            path.unlink()
-        except OSError as e:
-            logger.debug(f"Could not remove drained pending file {path}: {e}")
+            if not batch:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                return
 
-    @staticmethod
-    def _rewrite_pending(path: Path, items: list[dict[str, Any]]) -> None:  # pyright: ignore[reportExplicitAny]
-        try:
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            lines = "\n".join(json.dumps(item, separators=(",", ":")) for item in items)
-            _ = tmp.write_text(lines + ("\n" if lines else ""), encoding="utf-8")
-            _ = tmp.replace(path)
-        except OSError as e:
-            logger.warning(f"Could not rewrite pending file {path}: {e}")
+            logger.info(f"Draining {len(batch)} pending item(s) from {path.name}")
+
+            if not await self._post_batch_raw(endpoint, batch):
+                return
+
+            if file_exhausted or not tail.strip():
+                try:
+                    path.unlink()
+                except OSError as e:
+                    logger.debug(f"Could not remove drained pending file {path}: {e}")
+                return
+
+            try:
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                _ = tmp.write_bytes(tail)
+                _ = tmp.replace(path)
+            except OSError as e:
+                logger.warning(f"Could not rewrite pending file {path}: {e}")
+                return
 
     # ------------------- Task loop -------------------
 
     async def _task_loop(self) -> None:
+        consumed = self._scheduler.task_consumed_event
         while not self._cancelled.is_set():
-            try:
-                _ = await asyncio.wait_for(
-                    self._cancelled.wait(), timeout=_TASK_POLL_INTERVAL_SEC,
-                )
+            # Wake on either: cancellation, a task-priority dequeue (refill
+            # opportunity), or the periodic fallback timer.
+            cancel_wait = asyncio.create_task(self._cancelled.wait())
+            consumed_wait = asyncio.create_task(consumed.wait())
+            done, pending = await asyncio.wait(
+                {cancel_wait, consumed_wait},
+                timeout=_TASK_POLL_INTERVAL_SEC,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for p in pending:
+                p.cancel()
+                try:
+                    await p
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
+            if self._cancelled.is_set():
                 return
-            except asyncio.TimeoutError:
-                pass
+            consumed.clear()
             try:
                 await self._fetch_and_dispatch_tasks()
             except Exception:  # noqa: BLE001
@@ -483,7 +535,7 @@ class SubmissionService:
     async def _fetch_and_dispatch_tasks(self) -> None:
         if self._session is None:
             return
-        if self._scheduler.task_queue_size >= _TASK_REFILL_THRESHOLD:
+        if self._outstanding_tasks >= _TASK_REFILL_THRESHOLD:
             return
         headers = self._backend.game_headers
         if headers is None:
@@ -512,7 +564,16 @@ class SubmissionService:
         if not tasks:
             return
 
-        logger.info(f"Received {len(tasks)} task(s) from backend")
+        counts: dict[str, int] = {}
+        for task in tasks:
+            it = task.get("item_type")
+            key = it if isinstance(it, str) else "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        logger.info(
+            f"Received {len(tasks)} task(s) from backend ({breakdown}); "
+            f"outstanding before dispatch={self._outstanding_tasks}"
+        )
         for task in tasks:
             self._dispatch_task(task)
 
@@ -525,6 +586,7 @@ class SubmissionService:
             return
 
         if item_type == "match_details":
+            self._outstanding_tasks += 1
             self._scheduler.enqueue_match_details(
                 lambda mid=target, sh=shard: self._run_detail_task(mid, sh),
                 "task",
@@ -535,9 +597,8 @@ class SubmissionService:
                 logger.warning(f"Dropping match_history task for {target[:8]}: assembler not ready")
                 return
             assembler = self._assembler
-            _ = asyncio.create_task(
-                assembler.assemble(target, shard, priority="task")
-            )
+            self._outstanding_tasks += 1
+            _ = asyncio.create_task(self._tracked_assemble(assembler, target, shard))
         elif item_type == "competitive_updates":
             if self._comp_update_assembler is None:
                 logger.warning(
@@ -545,16 +606,27 @@ class SubmissionService:
                 )
                 return
             cu_assembler = self._comp_update_assembler
-            _ = asyncio.create_task(
-                cu_assembler.assemble(target, shard, priority="task")
-            )
+            self._outstanding_tasks += 1
+            _ = asyncio.create_task(self._tracked_assemble(cu_assembler, target, shard))
         else:
             logger.warning(f"Unknown task item_type: {item_type!r}")
+
+    async def _tracked_assemble(
+        self,
+        assembler: HistoryAssembler | CompetitiveUpdateAssembler,
+        target: str,
+        shard: str,
+    ) -> None:
+        try:
+            _ = await assembler.assemble(target, shard, priority="task")
+        finally:
+            self._outstanding_tasks -= 1
 
     # ------------------- Match-details task -------------------
 
     async def _run_detail_task(self, match_id: str, shard: str) -> None:
         if self._session is None:
+            self._outstanding_tasks -= 1
             return
         try:
             payload, status = await self._session.general_get_details_raw(match_id, shard=shard)
@@ -563,11 +635,13 @@ class SubmissionService:
             await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
                 shard=shard, match_id=match_id, riot_status=0, match_details=None,
             ))
+            self._outstanding_tasks -= 1
             return
 
         if status == 429:
             logger.info(f"Task detail {match_id[:8]} got 429; re-enqueueing")
             await asyncio.sleep(_RATELIMIT_RETRY_DELAY)
+            # Outstanding count stays the same: this task isn't done yet.
             self._scheduler.enqueue_match_details(
                 lambda mid=match_id, sh=shard: self._run_detail_task(mid, sh),
                 "task",
@@ -578,5 +652,6 @@ class SubmissionService:
         await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
             shard=shard, match_id=match_id, riot_status=status, match_details=payload,
         ))
+        self._outstanding_tasks -= 1
 
     # Match-history task assembly is delegated to HistoryAssembler.

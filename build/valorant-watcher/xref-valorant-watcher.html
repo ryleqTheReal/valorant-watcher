@@ -182,6 +182,7 @@ imports:
  &#8226;   <a href="#services.gamestates">services.gamestates</a>
  &#8226;   <a href="#services.hardware_service">services.hardware_service</a>
  &#8226;   <a href="#services.launch_observer">services.launch_observer</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
  &#8226;   <a href="#signal">signal</a>
  &#8226;   <a href="#sre_compile">sre_compile</a>
@@ -828,6 +829,7 @@ imported by:
  &#8226;   <a href="#packaging.utils">packaging.utils</a>
  &#8226;   <a href="#packaging.version">packaging.version</a>
  &#8226;   <a href="#pydoc">pydoc</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.config_manager">services.config_manager</a>
@@ -837,6 +839,7 @@ imported by:
  &#8226;   <a href="#services.launch_observer">services.launch_observer</a>
  &#8226;   <a href="#services.match_collector">services.match_collector</a>
  &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
  &#8226;   <a href="#setuptools">setuptools</a>
  &#8226;   <a href="#setuptools._core_metadata">setuptools._core_metadata</a>
@@ -4166,12 +4169,15 @@ imported by:
  &#8226;   <a href="#asyncio.windows_utils">asyncio.windows_utils</a>
  &#8226;   <a href="#httpx._transports.asgi">httpx._transports.asgi</a>
  &#8226;   <a href="#main.py">main.py</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.gamesocket">services.gamesocket</a>
  &#8226;   <a href="#services.gamestates">services.gamestates</a>
  &#8226;   <a href="#services.launch_observer">services.launch_observer</a>
+ &#8226;   <a href="#services.match_collector">services.match_collector</a>
  &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
  &#8226;   <a href="#unittest.async_case">unittest.async_case</a>
  &#8226;   <a href="#unittest.mock">unittest.mock</a>
@@ -6753,6 +6759,7 @@ imported by:
  &#8226;   <a href="#h11._events">h11._events</a>
  &#8226;   <a href="#packaging._tokenizer">packaging._tokenizer</a>
  &#8226;   <a href="#pprint">pprint</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.event_bus">services.event_bus</a>
@@ -11958,6 +11965,7 @@ imported by:
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.gamestates">services.gamestates</a>
  &#8226;   <a href="#services.launch_observer">services.launch_observer</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
 
   </div>
@@ -14114,6 +14122,7 @@ imported by:
  &#8226;   <a href="#multiprocessing.util">multiprocessing.util</a>
  &#8226;   <a href="#packaging.tags">packaging.tags</a>
  &#8226;   <a href="#requests">requests</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.event_bus">services.event_bus</a>
@@ -14123,6 +14132,7 @@ imported by:
  &#8226;   <a href="#services.launch_observer">services.launch_observer</a>
  &#8226;   <a href="#services.match_collector">services.match_collector</a>
  &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
  &#8226;   <a href="#setuptools._distutils._log">setuptools._distutils._log</a>
  &#8226;   <a href="#setuptools._distutils.cmd">setuptools._distutils.cmd</a>
@@ -17493,7 +17503,8 @@ imported by:
   <a target="code" href="-" type="text/plain"><tt>services</tt></a>
 <span class="moduletype">NamespacePackage</span>  <div class="import">
 imported by:
-    <a href="#services.auth_service">services.auth_service</a>
+    <a href="#services.assembler">services.assembler</a>
+ &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.config_manager">services.config_manager</a>
  &#8226;   <a href="#services.event_bus">services.event_bus</a>
@@ -17503,6 +17514,33 @@ imported by:
  &#8226;   <a href="#services.launch_observer">services.launch_observer</a>
  &#8226;   <a href="#services.match_collector">services.match_collector</a>
  &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
+ &#8226;   <a href="#services.submission_service">services.submission_service</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="services.assembler"></a>
+  <a target="code" href="///C:/Users/legit/Desktop/valorant-watcher/src/services/assembler.py" type="text/plain"><tt>services.assembler</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#__future__">__future__</a>
+ &#8226;   <a href="#asyncio">asyncio</a>
+ &#8226;   <a href="#dataclasses">dataclasses</a>
+ &#8226;   <a href="#logging">logging</a>
+ &#8226;   <a href="#services">services</a>
+ &#8226;   <a href="#services.event_bus">services.event_bus</a>
+ &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
+ &#8226;   <a href="#time">time</a>
+ &#8226;   <a href="#typing">typing</a>
+ &#8226;   <a href="#utils.models">utils.models</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#services.match_collector">services.match_collector</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
 
   </div>
@@ -17578,6 +17616,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#main.py">main.py</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
 
   </div>
@@ -17624,6 +17663,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#main.py">main.py</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.gamesocket">services.gamesocket</a>
@@ -17631,6 +17671,7 @@ imported by:
  &#8226;   <a href="#services.hardware_service">services.hardware_service</a>
  &#8226;   <a href="#services.launch_observer">services.launch_observer</a>
  &#8226;   <a href="#services.match_collector">services.match_collector</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
 
   </div>
@@ -17748,15 +17789,18 @@ imported by:
 <span class="moduletype">SourceModule</span>  <div class="import">
 imports:
     <a href="#__future__">__future__</a>
+ &#8226;   <a href="#asyncio">asyncio</a>
  &#8226;   <a href="#collections">collections</a>
  &#8226;   <a href="#json">json</a>
  &#8226;   <a href="#logging">logging</a>
  &#8226;   <a href="#pathlib">pathlib</a>
  &#8226;   <a href="#random">random</a>
  &#8226;   <a href="#services">services</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.event_bus">services.event_bus</a>
  &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
+ &#8226;   <a href="#time">time</a>
  &#8226;   <a href="#typing">typing</a>
  &#8226;   <a href="#utils.exceptions">utils.exceptions</a>
  &#8226;   <a href="#utils.models">utils.models</a>
@@ -17788,9 +17832,35 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#services.gamestates">services.gamestates</a>
+    <a href="#services.assembler">services.assembler</a>
+ &#8226;   <a href="#services.gamestates">services.gamestates</a>
  &#8226;   <a href="#services.match_collector">services.match_collector</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
+
+  </div>
+
+</div>
+
+<div class="node">
+  <a name="services.session_service"></a>
+  <a target="code" href="///C:/Users/legit/Desktop/valorant-watcher/src/services/session_service.py" type="text/plain"><tt>services.session_service</tt></a>
+<span class="moduletype">SourceModule</span>  <div class="import">
+imports:
+    <a href="#__future__">__future__</a>
+ &#8226;   <a href="#asyncio">asyncio</a>
+ &#8226;   <a href="#httpx">httpx</a>
+ &#8226;   <a href="#logging">logging</a>
+ &#8226;   <a href="#services">services</a>
+ &#8226;   <a href="#services.backend_service">services.backend_service</a>
+ &#8226;   <a href="#services.event_bus">services.event_bus</a>
+ &#8226;   <a href="#time">time</a>
+ &#8226;   <a href="#typing">typing</a>
+ &#8226;   <a href="#uuid">uuid</a>
+
+  </div>
+  <div class="import">
+imported by:
+    <a href="#main.py">main.py</a>
 
   </div>
 
@@ -17809,12 +17879,12 @@ imports:
  &#8226;   <a href="#logging">logging</a>
  &#8226;   <a href="#pathlib">pathlib</a>
  &#8226;   <a href="#services">services</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.event_bus">services.event_bus</a>
  &#8226;   <a href="#services.gamestates">services.gamestates</a>
  &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
- &#8226;   <a href="#time">time</a>
  &#8226;   <a href="#typing">typing</a>
  &#8226;   <a href="#utils.file_utils">utils.file_utils</a>
  &#8226;   <a href="#utils.models">utils.models</a>
@@ -22809,10 +22879,12 @@ imported by:
  &#8226;   <a href="#requests.auth">requests.auth</a>
  &#8226;   <a href="#requests.cookies">requests.cookies</a>
  &#8226;   <a href="#requests.sessions">requests.sessions</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
+ &#8226;   <a href="#services.match_collector">services.match_collector</a>
  &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
- &#8226;   <a href="#services.submission_service">services.submission_service</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#setuptools._vendor.backports.tarfile">setuptools._vendor.backports.tarfile</a>
  &#8226;   <a href="#setuptools._vendor.jaraco.functools">setuptools._vendor.jaraco.functools</a>
  &#8226;   <a href="#setuptools._vendor.more_itertools.more">setuptools._vendor.more_itertools.more</a>
@@ -23374,6 +23446,7 @@ imported by:
  &#8226;   <a href="#packaging.utils">packaging.utils</a>
  &#8226;   <a href="#packaging.version">packaging.version</a>
  &#8226;   <a href="#requests.adapters">requests.adapters</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.config_manager">services.config_manager</a>
@@ -23381,6 +23454,7 @@ imported by:
  &#8226;   <a href="#services.gamestates">services.gamestates</a>
  &#8226;   <a href="#services.match_collector">services.match_collector</a>
  &#8226;   <a href="#services.request_scheduler">services.request_scheduler</a>
+ &#8226;   <a href="#services.session_service">services.session_service</a>
  &#8226;   <a href="#services.submission_service">services.submission_service</a>
  &#8226;   <a href="#setuptools">setuptools</a>
  &#8226;   <a href="#setuptools._distutils._modified">setuptools._distutils._modified</a>
@@ -25301,6 +25375,7 @@ imports:
   <div class="import">
 imported by:
     <a href="#main.py">main.py</a>
+ &#8226;   <a href="#services.assembler">services.assembler</a>
  &#8226;   <a href="#services.auth_service">services.auth_service</a>
  &#8226;   <a href="#services.backend_service">services.backend_service</a>
  &#8226;   <a href="#services.config_manager">services.config_manager</a>
@@ -25336,7 +25411,8 @@ imports:
   </div>
   <div class="import">
 imported by:
-    <a href="#websockets.asyncio.connection">websockets.asyncio.connection</a>
+    <a href="#services.session_service">services.session_service</a>
+ &#8226;   <a href="#websockets.asyncio.connection">websockets.asyncio.connection</a>
  &#8226;   <a href="#websockets.legacy.protocol">websockets.legacy.protocol</a>
  &#8226;   <a href="#websockets.protocol">websockets.protocol</a>
  &#8226;   <a href="#websockets.sync.connection">websockets.sync.connection</a>

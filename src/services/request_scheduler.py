@@ -127,6 +127,10 @@ class RequestScheduler:
         self._mh_notify: asyncio.Event = asyncio.Event()
         self._cu_notify: asyncio.Event = asyncio.Event()
 
+        # Fires whenever a `task`-priority paced request is dequeued, so the
+        # submission service can refill server tasks promptly.
+        self._task_consumed: asyncio.Event = asyncio.Event()
+
         # Paced-worker pause gate (shared by md + mh; unlimited ignores it)
         self._paced_active: asyncio.Event = asyncio.Event()
         self._paced_active.set()
@@ -167,6 +171,11 @@ class RequestScheduler:
             + len(self._mh_task_queue)
             + len(self._cu_task_queue)
         )
+
+    @property
+    def task_consumed_event(self) -> asyncio.Event:
+        """Set whenever a `task`-priority paced request is dequeued."""
+        return self._task_consumed
 
     def start(self) -> None:
         """Start the four worker loops. No-op if already running."""
@@ -323,11 +332,13 @@ class RequestScheduler:
             logger.info(f"Purged {count} state-bound request(s)")
 
     @staticmethod
-    def _pop_first_nonempty(queues: list[deque[QueuedRequest]]) -> QueuedRequest | None:
-        for q in queues:
+    def _pop_first_nonempty(
+        queues: list[deque[QueuedRequest]],
+    ) -> tuple[QueuedRequest | None, int]:
+        for i, q in enumerate(queues):
             if q:
-                return q.popleft()
-        return None
+                return q.popleft(), i
+        return None, -1
 
     async def _unlimited_worker(self) -> None:
         """Drains state then userinfo. No pacing, no pause gate."""
@@ -380,11 +391,17 @@ class RequestScheduler:
                 _ = await self._paced_active.wait()
                 continue
 
-            item = self._pop_first_nonempty(queues_in_priority_order())
+            item, tier_index = self._pop_first_nonempty(queues_in_priority_order())
             if item is None:
                 notify.clear()
                 _ = await notify.wait()
                 continue
+
+            # Tier 1 is always the `task` queue (self=0, task=1, dig=2). Signal
+            # any subscriber (e.g. SubmissionService) that the task queue just
+            # shrank so they can decide whether to refill from the backend.
+            if tier_index == 1:
+                self._task_consumed.set()
 
             try:
                 await pacer.acquire()

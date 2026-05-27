@@ -324,15 +324,15 @@ class GamestateHandler:
         logged into the Riot Client. Only RSO_LOGOUT/SHUTDOWN kills those.
         """
         self._valorant_open = False
-        self._clear_game_state()
+        await self._clear_game_state()
 
     async def _on_rso_logout(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
         """Riot Client logged out -> reset tracking state."""
-        self._reset()
+        await self._reset()
 
     async def _on_shutdown(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
         """App shutting down -> reset tracking state."""
-        self._reset()
+        await self._reset()
 
     # ------------------- State Change Dispatch -------------------
 
@@ -348,6 +348,16 @@ class GamestateHandler:
         self._active_queue_id = None
         # This makes the state queue be cleared and go to sleep
         self._scheduler.on_state_change()
+
+        if transition.previous == SessionLoopState.PREGAME:
+            _ = await self.bus.emit(Event.PREGAME_ENDED)
+        elif transition.previous == SessionLoopState.INGAME:
+            _ = await self.bus.emit(Event.MATCH_ENDED)
+
+        if transition.current == SessionLoopState.PREGAME:
+            _ = await self.bus.emit(Event.PREGAME_STARTED)
+        elif transition.current == SessionLoopState.INGAME:
+            _ = await self.bus.emit(Event.MATCH_STARTED)
 
         # First presence received -> fetch account aliases once
         if transition.previous is None:
@@ -656,7 +666,7 @@ class GamestateHandler:
             _ = self._pregame_poll_task.cancel()
         self._pregame_poll_task = None
 
-    def _clear_game_state(self) -> None:
+    async def _clear_game_state(self) -> None:
         """Clear game-state tracking without touching the session or match collector.
 
         Used when Valorant closes but the Riot Client is still logged in.
@@ -675,6 +685,10 @@ class GamestateHandler:
         self._collector_paused = False
         self._scheduler.resume()
         self._cancel_pending_task()
+        if self._current_state == SessionLoopState.PREGAME:
+            _ = await self.bus.emit(Event.PREGAME_ENDED)
+        elif self._current_state == SessionLoopState.INGAME:
+            _ = await self.bus.emit(Event.MATCH_ENDED)
         if self._current_state is not None:
             logger.info("Game state cleared (Valorant closed, match collector still active)")
         self._current_state = None
@@ -686,12 +700,12 @@ class GamestateHandler:
         self._penalties_version = None
         self._mmr_version = None
 
-    def _reset(self) -> None:
+    async def _reset(self) -> None:
         """Full teardown: clear everything including session and match collector.
 
         Used on RSO_LOGOUT and SHUTDOWN when the session is no longer valid.
         """
-        self._clear_game_state()
+        await self._clear_game_state()
         if self._store_poll_task and not self._store_poll_task.done():
             _ = self._store_poll_task.cancel()
             self._store_poll_task = None

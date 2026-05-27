@@ -48,6 +48,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,42 @@ logger: logging.Logger = logging.getLogger(__name__)
 DIG_RESTART_CHANCE: float = 0.15
 MAX_UNVISITED_PLAYERS: int = 5000
 _COLLECTOR_PRIORITY = "dig"  # All collector requests yield to "task"
+
+# Riot expires match details 90 days after start. Drop with a 1 hour buffer
+# so we never enqueue a fetch that would race the expiry.
+_MATCH_MAX_AGE_MS: int = (90 * 24 - 1) * 60 * 60 * 1000
+
+_FETCHED_MATCHES_CAP: int = 2_000
+_DIG_VISITED_CAP: int = 1_000
+_DIG_VISITED_MATCHES_CAP: int = 2_000
+_COMP_UPDATE_SEEN_CAP: int = 1_000
+_COMP_UPDATE_QUEUE_MAX: int = 50
+
+
+def _cap_set(s: set[str], limit: int) -> None:
+    """Prune a set to half its limit when it exceeds the limit.
+
+    Evicts arbitrary entries. The dedup sets only guard against redundant
+    API calls, so re-fetching an evicted entry is harmless.
+    """
+    if len(s) <= limit:
+        return
+    target = limit // 2
+    excess = len(s) - target
+    victims: list[str] = []
+    for item in s:
+        if len(victims) >= excess:
+            break
+        victims.append(item)
+    s.difference_update(victims)
+    logger.info(f"Pruned set from {len(s) + excess} to {len(s)} entries")
+
+
+def _is_expired(start_time_ms: int | None) -> bool:
+    """True if the match start time is known and older than 89d 23h."""
+    if not start_time_ms or start_time_ms <= 0:
+        return False
+    return (int(time.time() * 1000) - start_time_ms) >= _MATCH_MAX_AGE_MS
 
 
 class MatchCollector:
@@ -115,10 +152,12 @@ class MatchCollector:
 
         # Dig phase: in-memory unvisited pool + per-walk pending detail queue
         self._unvisited_players: set[str] = set()
-        self._dig_detail_queue: deque[str] = deque()
+        self._dig_detail_queue: deque[tuple[str, int | None]] = deque()
 
         # In-session dedup for competitive-update assemblies (per-puuid).
         self._comp_update_seen: set[str] = set()
+        self._comp_update_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_COMP_UPDATE_QUEUE_MAX)
+        self._comp_update_worker: asyncio.Task[None] | None = None
 
         self._load_watermark()
         self._register_chain_subscribers()
@@ -157,9 +196,13 @@ class MatchCollector:
             if not isinstance(entry, dict):
                 continue
             mid = entry.get("MatchID")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            start = entry.get("GameStartTime")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            start_ms = start if isinstance(start, int) else None
+            if _is_expired(start_ms):
+                continue
             if isinstance(mid, str) and mid and mid not in self._watermark.fetched_matches:
                 self._watermark.fetched_matches.add(mid)
-                self._enqueue_chain_detail(mid, ev.shard)
+                self._enqueue_chain_detail(mid, ev.shard, start_ms)
 
     async def _on_competitive_update_event(self, ev: CompetitiveUpdateEvent) -> None:
         if not self._running or ev.riot_status != 200 or not ev.competitive_updates:
@@ -169,25 +212,34 @@ class MatchCollector:
             if not isinstance(entry, dict):
                 continue
             mid = entry.get("MatchID")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            start = entry.get("MatchStartTime")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            start_ms = start if isinstance(start, int) else None
+            if _is_expired(start_ms):
+                continue
             if isinstance(mid, str) and mid and mid not in self._watermark.fetched_matches:
                 self._watermark.fetched_matches.add(mid)
-                self._enqueue_chain_detail(mid, ev.shard)
+                self._enqueue_chain_detail(mid, ev.shard, start_ms)
 
     async def _on_match_detail_event(self, ev: MatchDetailEvent) -> None:
         if not self._running or ev.riot_status != 200 or not ev.match_details:
             return
         self._harvest_players(ev.match_details)
         self._fanout_comp_updates(ev.match_details)
+        self._prune_sets()
 
-    def _enqueue_chain_detail(self, match_id: str, shard: str) -> None:
+    def _enqueue_chain_detail(
+        self, match_id: str, shard: str, game_start_millis: int | None = None,
+    ) -> None:
         """Enqueue a match-detail fetch on a foreign shard at dig priority."""
         self._scheduler.enqueue_match_details(
-            lambda mid=match_id, sh=shard: self._fetch_chain_detail(mid, sh),
+            lambda mid=match_id, sh=shard, gs=game_start_millis: self._fetch_chain_detail(mid, sh, gs),
             _COLLECTOR_PRIORITY,
             f"chain detail {match_id[:8]}",
         )
 
-    async def _fetch_chain_detail(self, match_id: str, shard: str) -> None:
+    async def _fetch_chain_detail(
+        self, match_id: str, shard: str, game_start_millis: int | None = None,
+    ) -> None:
         if not self._running:
             return
         try:
@@ -198,11 +250,13 @@ class MatchCollector:
             logger.exception(f"Chain: detail {match_id[:8]} raised")
             _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
                 shard=shard, match_id=match_id, riot_status=0, match_details=None,
+                game_start_millis=game_start_millis,
             ))
             return
 
         _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
             shard=shard, match_id=match_id, riot_status=status, match_details=payload,
+            game_start_millis=game_start_millis,
         ))
 
     @property
@@ -234,6 +288,7 @@ class MatchCollector:
             f"visited_players={len(self._watermark.dig_visited)}, "
             f"visited_matches={len(self._watermark.dig_visited_matches)})"
         )
+        self._comp_update_worker = asyncio.create_task(self._run_comp_update_worker())
         self._fresh_task = asyncio.create_task(self._run_fresh())
 
     def stop(self) -> None:
@@ -243,6 +298,9 @@ class MatchCollector:
         self._running = False
         if self._fresh_task and not self._fresh_task.done():
             _ = self._fresh_task.cancel()
+        if self._comp_update_worker and not self._comp_update_worker.done():
+            _ = self._comp_update_worker.cancel()
+            self._comp_update_worker = None
         self._save_watermark()
         logger.info("Match collector stopped")
 
@@ -297,8 +355,12 @@ class MatchCollector:
                 continue
             if mid in self._watermark.fetched_matches:
                 continue
+            start = entry.get("GameStartTime")
+            start_ms = start if isinstance(start, int) else None
+            if _is_expired(start_ms):
+                continue
             self._watermark.fetched_matches.add(mid)
-            self._enqueue_self_detail(mid)
+            self._enqueue_self_detail(mid, start_ms)
             new_count += 1
 
         logger.info(
@@ -307,14 +369,18 @@ class MatchCollector:
         self._save_watermark()
         self._transition_to_dig()
 
-    def _enqueue_self_detail(self, match_id: str) -> None:
+    def _enqueue_self_detail(
+        self, match_id: str, game_start_millis: int | None = None,
+    ) -> None:
         self._scheduler.enqueue_match_details(
-            lambda mid=match_id: self._fetch_self_detail(mid),
+            lambda mid=match_id, gs=game_start_millis: self._fetch_self_detail(mid, gs),
             _COLLECTOR_PRIORITY,
             f"fresh detail {match_id[:8]}",
         )
 
-    async def _fetch_self_detail(self, match_id: str) -> None:
+    async def _fetch_self_detail(
+        self, match_id: str, game_start_millis: int | None = None,
+    ) -> None:
         """Fetch a fresh-phase match detail, emit event, harvest players."""
         if not self._running:
             return
@@ -327,6 +393,7 @@ class MatchCollector:
             logger.exception(f"Fresh: detail {match_id[:8]} raised")
             _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
                 shard=self._shard, match_id=match_id, riot_status=0, match_details=None,
+                game_start_millis=game_start_millis,
             ))
             return
 
@@ -334,6 +401,7 @@ class MatchCollector:
         # bus subscriber (so server-task details also fan out).
         _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
             shard=self._shard, match_id=match_id, riot_status=status, match_details=payload,
+            game_start_millis=game_start_millis,
         ))
 
     # --------- Phase 2: Dig (randomized DFS) ---------
@@ -394,20 +462,24 @@ class MatchCollector:
             return
 
         history_entries: list[dict[str, Any]] = event.match_history.get("History") or []  # pyright: ignore[reportAny]
-        unvisited: list[str] = []
+        unvisited: list[tuple[str, int | None]] = []
         for entry in history_entries:
             mid = entry.get("MatchID")  # pyright: ignore[reportAny]
+            start = entry.get("GameStartTime")  # pyright: ignore[reportAny]
+            start_ms = start if isinstance(start, int) else None
+            if _is_expired(start_ms):
+                continue
             if isinstance(mid, str) and mid not in self._watermark.dig_visited_matches:
-                unvisited.append(mid)
+                unvisited.append((mid, start_ms))
 
         if not unvisited:
             logger.debug(f"DFS dead end at player {target_puuid[:8]} (all matches visited)")
             self._dig_walk_start()
             return
 
-        for mid in unvisited:
+        for mid, _start in unvisited:
             self._watermark.fetched_matches.add(mid)
-            self._dig_detail_queue.append(mid)
+            self._dig_detail_queue.append((mid, _start))
 
         logger.info(
             f"Dig: queued {len(unvisited)} match(es) from {target_puuid[:8]} "  # pyright: ignore[reportImplicitStringConcatenation]
@@ -420,16 +492,18 @@ class MatchCollector:
             return
 
         if self._dig_detail_queue:
-            match_id: str = self._dig_detail_queue.popleft()
+            match_id, game_start_millis = self._dig_detail_queue.popleft()
             self._scheduler.enqueue_match_details(
-                lambda mid=match_id: self._fetch_dig_detail(mid),
+                lambda mid=match_id, gs=game_start_millis: self._fetch_dig_detail(mid, gs),
                 _COLLECTOR_PRIORITY,
                 f"dig detail {match_id[:8]}",
             )
         else:
             self._dig_walk_start()
 
-    async def _fetch_dig_detail(self, match_id: str) -> None:
+    async def _fetch_dig_detail(
+        self, match_id: str, game_start_millis: int | None = None,
+    ) -> None:
         """Fetch a dig-phase match detail, harvest players, then drain or walk."""
         if not self._running:
             return
@@ -447,6 +521,7 @@ class MatchCollector:
         # bus subscriber.
         _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
             shard=self._shard, match_id=match_id, riot_status=status, match_details=payload,
+            game_start_millis=game_start_millis,
         ))
 
         if status == 200 and payload is not None:
@@ -513,21 +588,51 @@ class MatchCollector:
                 self._enqueue_competitive_update(puuid)
 
     def _enqueue_competitive_update(self, puuid: str) -> None:
-        """Kick off a CompetitiveUpdateAssembler at "dig" priority.
+        """Queue a CompetitiveUpdateAssembler job at "dig" priority.
 
         Deduped per-session: re-fetching the same player's comp updates
         wastes 20+ paginated calls for unchanged data, and once we've
         already reported a status to the backend for this puuid the
         item is no longer claimable by us anyway.
+
+        Jobs are processed by a single worker task to avoid hundreds of
+        coroutines piling up waiting on the assembler's serial lock.
         """
         if puuid in self._comp_update_seen:
             return
         self._comp_update_seen.add(puuid)
-        _ = asyncio.create_task(
-            self._comp_update_assembler.assemble(
-                puuid, self._shard, priority=_COLLECTOR_PRIORITY,
-            )
-        )
+        _cap_set(self._comp_update_seen, _COMP_UPDATE_SEEN_CAP)
+        try:
+            self._comp_update_queue.put_nowait(puuid)
+        except asyncio.QueueFull:
+            pass
+
+    async def _run_comp_update_worker(self) -> None:
+        """Single worker that drains the comp-update queue sequentially."""
+        while self._running:
+            try:
+                puuid = await asyncio.wait_for(self._comp_update_queue.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                return
+            if not self._running:
+                return
+            try:
+                _ = await self._comp_update_assembler.assemble(
+                    puuid, self._shard, priority=_COLLECTOR_PRIORITY,
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001
+                logger.exception(f"Comp-update worker: assembly for {puuid[:8]} raised")
+
+    def _prune_sets(self) -> None:
+        """Cap all dedup sets to prevent unbounded memory growth."""
+        _cap_set(self._watermark.fetched_matches, _FETCHED_MATCHES_CAP)
+        _cap_set(self._watermark.dig_visited, _DIG_VISITED_CAP)
+        _cap_set(self._watermark.dig_visited_matches, _DIG_VISITED_MATCHES_CAP)
+        _cap_set(self._comp_update_seen, _COMP_UPDATE_SEEN_CAP)
 
     # --------- Watermark Persistence ---------
 
