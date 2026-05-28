@@ -28,6 +28,7 @@ from utils.models import (
     AccessTokenJWT,
     AccountAlias,
     AccountXPResponse,
+    BalancesResponse,
     FriendRequestsResponse,
     FriendResponse,
     EntitlementsTokenResponse,
@@ -568,6 +569,11 @@ class RiotSession:
         """Fetch the player's current penalties"""
         response = await self.fetch("GET", "pd", EndpointURI("/restrictions/v3/penalties"))
         return PenaltiesResponse(**response.json())  # pyright: ignore[reportAny]
+
+    async def general_get_balances(self) -> BalancesResponse:
+        """Fetch the player's current wallet balances (VP, RP, KC, etc.)."""
+        response = await self.fetch("GET", "pd", EndpointURI(f"/store/v1/wallet/{self.puuid}"))
+        return BalancesResponse(**response.json())  # pyright: ignore[reportAny]
         
     async def general_get_mmr(self) -> PlayerMMRResponse:
         """Fetch the player's current MMR history"""

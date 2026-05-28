@@ -77,11 +77,11 @@ _COLLECTOR_PRIORITY = "dig"  # All collector requests yield to "task"
 # so we never enqueue a fetch that would race the expiry.
 _MATCH_MAX_AGE_MS: int = (90 * 24 - 1) * 60 * 60 * 1000
 
-_FETCHED_MATCHES_CAP: int = 2_000
-_DIG_VISITED_CAP: int = 1_000
-_DIG_VISITED_MATCHES_CAP: int = 2_000
-_COMP_UPDATE_SEEN_CAP: int = 1_000
-_COMP_UPDATE_QUEUE_MAX: int = 50
+_FETCHED_MATCHES_CAP: int = 100
+_DIG_VISITED_CAP: int = 500
+_DIG_VISITED_MATCHES_CAP: int = 200
+_COMP_UPDATE_SEEN_CAP: int = 500
+_COMP_UPDATE_QUEUE_MAX: int = 25
 
 
 def _cap_set(s: set[str], limit: int) -> None:

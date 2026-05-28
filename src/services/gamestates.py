@@ -120,6 +120,7 @@ class GamestateHandler:
         self._xp_version: int | None = None
         self._penalties_version: int | None = None
         self._mmr_version: int | None = None
+        self._balances_snapshot: dict[str, int] | None = None
         self._store_poll_task: asyncio.Task[None] | None = None
         self._userinfo_poll_task: asyncio.Task[None] | None = None
         self._collector_paused: bool = False
@@ -496,6 +497,7 @@ class GamestateHandler:
         self._scheduler.enqueue_userinfo(self._check_loadout, "loadout")
         self._scheduler.enqueue_userinfo(self._check_xp, "xp")
         self._scheduler.enqueue_userinfo(self._check_penalties, "penalties")
+        self._scheduler.enqueue_userinfo(self._check_balances, "balances")
 
     async def _poll_userinfo(self) -> None:
         """Re-enqueue all userinfo checks every minute.
@@ -699,6 +701,7 @@ class GamestateHandler:
         self._xp_version = None
         self._penalties_version = None
         self._mmr_version = None
+        self._balances_snapshot = None
 
     async def _reset(self) -> None:
         """Full teardown: clear everything including session and match collector.
@@ -757,8 +760,11 @@ class GamestateHandler:
                     pregame_version = match_data.Version
                     _ = await self.bus.emit(Event.PREGAME_MATCH_UPDATED, match_data)
                     logger.debug(f"Pregame match updated: version {pregame_version}")
+                    if match_data.PregameState == "character_select_finished":
+                        logger.info("Pregame poll ended because everybody locked their character")
+                        return
 
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)
 
         except asyncio.CancelledError:
             logger.info("Pregame poll cancelled (state changed)")
@@ -871,6 +877,18 @@ class GamestateHandler:
             label="user penalties version",
         )
     
+    async def _check_balances(self) -> None:
+        """Checks whether the user's wallet balances have changed.
+
+        Balances has no Version field — compare the dict itself."""
+        await self._check_and_emit(
+            fetch=self._session.general_get_balances,  # pyright: ignore[reportOptionalMemberAccess]
+            get_key=lambda balances: balances.Balances,
+            cache_attr="_balances_snapshot",
+            event=Event.BALANCES_UPDATED,
+            label="user balances",
+        )
+
     async def _check_mmr(self) -> None:
         """Checks whether the user's MMR history has updated"""
         await self._check_and_emit(

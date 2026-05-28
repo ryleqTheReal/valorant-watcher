@@ -40,6 +40,7 @@ class Event(Enum):
     OWNED_ITEMS_UPDATED = "OWNED_ITEMS_UPDATED" # User has acquired or lost items
     USER_XP_UPDATED = "USER_XP_UPDATED"         # The user's XP has been updated
     PENALTIES_UPDATED = "PENALTIES_UPDATED"     # Emitted when the user's penalties updated
+    BALANCES_UPDATED = "BALANCES_UPDATED"       # Emitted when the user's wallet balances change
     MMR_HISTORY_UPDATED = "MMR_HISTORY_UPDATED" # The player's MMR history has updated
     MATCH_DETAIL_FETCHED = "MATCH_DETAIL_FETCHED" # A match's full details have been fetched (MatchDetailEvent payload)
     MATCH_HISTORY_FETCHED = "MATCH_HISTORY_FETCHED" # A player's match history page has been fetched (MatchHistoryEvent payload)

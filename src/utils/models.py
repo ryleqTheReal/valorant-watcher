@@ -858,6 +858,32 @@ class AccountXPResponse:
             self.History = [_XPHistoryEntry(**_filter_known(_XPHistoryEntry, h)) for h in self.History]  # pyright: ignore[reportCallIssue, reportArgumentType]
 
 @dataclass
+class _CurrencyLimit:
+    """A single per-currency limit entry."""
+    Limits: dict[str, dict[str, object]] | None = None    # keyed by limit-UUID -> {"amount": int, "limitType": str}
+
+@dataclass
+class BalancesResponse:
+    """Response from GET /store/v1/wallet/{puuid} (Riot store wallet).
+
+    The backend's /v1/account/balances also accepts the richer
+    /wallet/v1/wallets/{puuid} shape that adds CurrencyLimits.
+    When using the store endpoint, CurrencyLimits is absent and
+    defaults to an empty dict (the backend allows {})."""
+    Balances: dict[str, int] = field(default_factory=dict)               # currency-UUID -> current amount
+    CurrencyLimits: dict[str, _CurrencyLimit] | dict[str, dict[str, object]] = field(default_factory=dict)  # currency-UUID -> { Limits: {...} }
+
+    def __post_init__(self) -> None:
+        if self.CurrencyLimits:
+            sample = next(iter(self.CurrencyLimits.values()))
+            if isinstance(sample, dict):
+                self.CurrencyLimits = {
+                    k: _CurrencyLimit(**_filter_known(_CurrencyLimit, v))  # pyright: ignore[reportArgumentType]
+                    for k, v in self.CurrencyLimits.items()
+                    if isinstance(v, dict)
+                }
+
+@dataclass
 class _LatestCompetitiveUpdate:
     """Most recent competitive match update."""
     MatchID: str | None = None                              # Match UUID
@@ -1096,6 +1122,7 @@ class _PregamePlayer:
 class _PregameTeam:
     TeamID: str | None = None
     Players: list[_PregamePlayer] | list[dict[str, object]] | None = None
+    TeamNumber: int | None = None
 
     def __post_init__(self) -> None:
         if self.Players and isinstance(self.Players[0], dict):

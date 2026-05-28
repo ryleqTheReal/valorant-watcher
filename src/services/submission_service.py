@@ -50,12 +50,14 @@ from utils.file_utils import (
 )
 from utils.models import (
     AccountXPResponse,
+    BalancesResponse,
     CompetitiveUpdateEvent,
     IngameLoadoutsEvent,
     MatchDetailEvent,
     MatchHistoryEvent,
     OwnedItemsResponse,
     PenaltiesResponse,
+    PregameMatchResponse,
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -63,13 +65,13 @@ logger: logging.Logger = logging.getLogger(__name__)
 # Match-details payloads can be megabytes each; the backend's HTTP body
 # limit kicks in well before the API's 100-item cap. We start small and
 # rely on _submit_with_split to halve further on 413.
-_MATCH_BATCH_MAX: int = 10
+_MATCH_BATCH_MAX: int = 15
 _HISTORY_BATCH_MAX: int = 50
 _COMP_UPDATE_BATCH_MAX: int = 50
 _FLUSH_INTERVAL_SEC: float = 20.0
 _TASK_POLL_INTERVAL_SEC: float = 20.0
 _TASK_REFILL_THRESHOLD: int = 5
-_TASKS_NEEDED: int = 45
+_TASKS_NEEDED: int = 41
 _RATELIMIT_RETRY_DELAY: float = 5.0  # local cushion before re-enqueueing a 429
 
 
@@ -130,6 +132,8 @@ class SubmissionService:
         _ = self._bus.on(Event.OWNED_ITEMS_UPDATED, self._on_owned_items_updated, priority=0)
         _ = self._bus.on(Event.INGAME_LOADOUTS_FETCHED, self._on_ingame_loadouts_fetched, priority=0)
         _ = self._bus.on(Event.PENALTIES_UPDATED, self._on_penalties_updated, priority=0)
+        _ = self._bus.on(Event.BALANCES_UPDATED, self._on_balances_updated, priority=0)
+        _ = self._bus.on(Event.PREGAME_MATCH_UPDATED, self._on_pregame_match_updated, priority=0)
 
     # ------------------- Event handlers -------------------
 
@@ -277,6 +281,28 @@ class SubmissionService:
             f"POST /v1/account/penalties -> HTTP {response.status_code} body={response.text[:200]!r}"
         )   
 
+    async def _on_balances_updated(self, data: BalancesResponse) -> None:
+        headers = self._backend.game_headers
+        if headers is None:
+            logger.info("Balances update received but backend game token unavailable; skipping")
+            return
+        body: dict[str, Any] = asdict(data)  # pyright: ignore[reportExplicitAny]
+        try:
+            response = await self._client.post(
+                f"{self._backend.base_url}/v1/account/balances",
+                json=body,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            logger.warning(f"POST /v1/account/balances transport error: {e}")
+            return
+        if response.status_code in (202, 204):
+            logger.info(f"Submitted balances snapshot (HTTP {response.status_code})")
+            return
+        logger.warning(
+            f"POST /v1/account/balances -> HTTP {response.status_code} body={response.text[:200]!r}"
+        )
+
     async def _on_owned_items_updated(self, data: OwnedItemsResponse) -> None:
         headers = self._backend.game_headers
         if headers is None:
@@ -325,6 +351,30 @@ class SubmissionService:
             return
         logger.warning(
             f"POST /v1/account/match-loadouts -> HTTP {response.status_code} body={response.text[:200]!r}"
+        )
+        
+    async def _on_pregame_match_updated(self, data: PregameMatchResponse) -> None:
+        headers = self._backend.game_headers
+        if headers is None:
+            logger.info("Pregame match update received but backend game token unavailable; skipping")
+            return
+
+        body: dict[str, Any] = asdict(data)  # pyright: ignore[reportExplicitAny]
+
+        try:
+            response = await self._client.post(
+                f"{self._backend.base_url}/v1/pregame",
+                json=body,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            logger.warning(f"POST /v1/pregame transport error: {e}")
+            return
+        if response.status_code in (202, 204):
+            logger.info(f"Submitted pregame match snapshot (HTTP {response.status_code})")
+            return
+        logger.warning(
+            f"POST /v1/pregame -> HTTP {response.status_code} body={response.text[:200]!r}"
         )
     # ------------------- Flush loop -------------------
 
