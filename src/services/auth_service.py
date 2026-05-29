@@ -2,7 +2,7 @@
 Authentication handler for the local Riot/Valorant API.
 
 Reacts to VALORANT process events and builds an authenticated session
-that can be used to query match data, stats, etc.
+that can be used to query match data, stats, etc
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ RATELIMIT_COOLDOWN: float = 65.0
 
 @dataclass
 class RiotSession:
-    """Authenticated session to the local Riot API."""
+    """Authenticated session to the local Riot API"""
 
     lockfile: LockfileData
     ratelimit_timeout: int = 65
@@ -130,7 +130,7 @@ class RiotSession:
                 response status code indicates an error.
 
         Returns:
-            The raw httpx response.
+            The raw httpx response
         """
         
         is_riot_endpoint: bool = type in ("pd", "glz", "shared")
@@ -164,7 +164,7 @@ class RiotSession:
                 json=payload,
             )
 
-        # Auth refresh: 401, or 400 with BAD_CLAIMS (expired entitlements).
+        # Auth refresh: 400 with BAD_CLAIMS (expired entitlements)
         needs_refresh = is_riot_endpoint and response.status_code == 401
         if is_riot_endpoint and response.status_code == 400:
             try:
@@ -186,11 +186,11 @@ class RiotSession:
         return response
 
     def _set_rate_limit_cooldown(self) -> None:
-        """Set the rate-limit cooldown to 65 seconds from now (60s + 5s safety margin)."""
+        """Set the rate-limit cooldown to 65 seconds from now (60s + 5s safety margin)"""
         self._cooldown_until = time.monotonic() + RATELIMIT_COOLDOWN
 
     async def _wait_for_rate_limit(self) -> None:
-        """If a rate-limit cooldown is active, sleep until it expires."""
+        """If a rate-limit cooldown is active, sleep until it expires"""
         remaining = self._cooldown_until - time.monotonic()
         if remaining > 0:
             logger.info(f"Rate-limit active, waiting {remaining}s remaining")
@@ -200,7 +200,7 @@ class RiotSession:
         """Re-fetch entitlements and update session headers.
 
         Uses a lock so that concurrent 401/400 BAD_CLAIMS responses only trigger one refresh.
-        Retries up to max_retries times with increasing delay on failure.
+        Retries up to max_retries times with increasing delay on failure
         """
         async with self._refresh_lock:
             for attempt in range(1, max_retries + 1):
@@ -266,14 +266,14 @@ class RiotSession:
             logger.error(f"Entitlements refresh failed after {max_retries} attempts")
 
     def _start_proactive_refresh(self) -> None:
-        """Spawn a background task that refreshes entitlements at 75% of token lifetime."""
+        """Spawn a background task that refreshes entitlements at 75% of token lifetime"""
         if self._refresh_task and not self._refresh_task.done():
             _ = self._refresh_task.cancel()
 
         self._refresh_task = asyncio.create_task(self._proactive_refresh_loop())
 
     async def _proactive_refresh_loop(self) -> None:
-        """Sleep until 75% of token lifetime, then refresh. Repeats until cancelled."""
+        """Sleep until 75% of token lifetime, then refresh. Repeats until cancelled"""
         while not self._cancelled.is_set():
             token_lifetime = self.expires_at - time.time()
             sleep_duration = max(token_lifetime * 0.75, 0)
@@ -294,7 +294,7 @@ class RiotSession:
         (e.g. VALORANT_CLOSED). Must be called after construction since __post_init__ is sync.
 
         Raises:
-            AuthenticationError: If the session is cancelled before entitlements are obtained.
+            AuthenticationError: If the session is cancelled before entitlements are obtained
         """
         
         # Wait for region data to appear in the log file
@@ -379,7 +379,7 @@ class RiotSession:
         self._start_proactive_refresh()
 
     async def _cancellable_sleep(self, seconds: float) -> None:
-        """Sleep that wakes up early if the session is cancelled."""
+        """Sleep that wakes up early if the session is cancelled"""
         try:
             _ = await asyncio.wait_for(self._cancelled.wait(), timeout=seconds)
         except asyncio.TimeoutError:
@@ -393,7 +393,7 @@ class RiotSession:
             access_token: The raw JWT string from the entitlements response.
 
         Returns:
-            The decoded and typed AccessTokenJWT instance.
+            The decoded and typed AccessTokenJWT instance
         """
         try:
             decoded_raw: dict[str, Any] = jwt_decode(access_token, options={"verify_signature": False})  # pyright: ignore[reportExplicitAny]
@@ -474,9 +474,7 @@ class RiotSession:
         For custom URL's set type to custom and put the URL as the endpoint.
 
         When `shard` is provided, rebuilds the base for pd/shared/glz to
-        target a different region than the session's home shard. pd and
-        shared swap their shard slot. glz swaps the glz_shard slot only,
-        keeping the session's glz_region.
+        target a different region than the session's home shard
         """
 
         if shard is not None and type in ("pd", "shared"):
@@ -503,7 +501,7 @@ class RiotSession:
             VersionNotFoundError: When the version could not be resolved from any source.
 
         Returns:
-            The full version string (e.g. "release-12.03-shipping-20-4322591").
+            The full version string (e.g. "release-12.03-shipping-20-4322591")
         """
         log_path: Path = get_recent_log_path()
 
@@ -550,7 +548,7 @@ class RiotSession:
     # ingame_*   => The endpoint is available during the INGAME sessionLoopState (match in progress)
 
     async def general_get_loadout(self) -> PlayerLoadoutResponse:
-        """Fetch the player's current loadout (skins, sprays, identity)."""
+        """Fetch the player's current loadout (skins, sprays, identity)"""
         response = await self.fetch("GET", "pd", EndpointURI(f"/personalization/v2/players/{self.puuid}/playerloadout"))
         return PlayerLoadoutResponse(**response.json())  # pyright: ignore[reportAny]
 
@@ -571,7 +569,7 @@ class RiotSession:
         return PenaltiesResponse(**response.json())  # pyright: ignore[reportAny]
 
     async def general_get_balances(self) -> BalancesResponse:
-        """Fetch the player's current wallet balances (VP, RP, KC, etc.)."""
+        """Fetch the player's current wallet balances (VP, RP, KC, etc.)"""
         response = await self.fetch("GET", "pd", EndpointURI(f"/store/v1/wallet/{self.puuid}"))
         return BalancesResponse(**response.json())  # pyright: ignore[reportAny]
         
@@ -581,7 +579,7 @@ class RiotSession:
         return PlayerMMRResponse(**response.json())  # pyright: ignore[reportAny]
 
     async def general_get_store(self) -> StorefrontResponse:
-        """Fetch the player's current storefront (daily offers, bundles, etc.)."""
+        """Fetch the player's current storefront (daily offers, bundles, etc.)"""
         response = await self.fetch("POST", "pd", EndpointURI(f"/store/v3/storefront/{self.puuid}"), payload={})
         return StorefrontResponse(**response.json())  # pyright: ignore[reportAny]
 
@@ -623,7 +621,7 @@ class RiotSession:
         """Fetch full match details. Returns raw dict (structure too complex to fully type).
 
         Pass `shard` to target a region other than the session's home shard
-        (e.g. a server-issued task pointing at another player's region).
+        (e.g. a server-issued task pointing at another player's region)
         """
         response = await self.fetch(
             "GET", "pd",
@@ -636,7 +634,7 @@ class RiotSession:
         """Fetch match details without raising on HTTP errors.
 
         Returns:
-            (payload, riot_status) — payload is None when riot_status != 200.
+            (payload, riot_status) payload is None when riot_status != 200
         """
         response = await self.fetch(
             "GET", "pd",
@@ -663,7 +661,7 @@ class RiotSession:
         Returns:
             (parsed, raw_dict, riot_status). Both data values are None
             when riot_status != 200. Used by the submission flow which
-            needs the raw json plus the exact Riot status code.
+            needs the raw json plus the exact Riot status code
         """
         total: int = end_index - start_index
         if total <= 0 or total > 20:
@@ -698,7 +696,7 @@ class RiotSession:
             - payload is None when riot_status != 200.
             - error_code is the body's ``errorCode`` string when one is
               present (e.g. "BAD_PARAMETER", "BAD_CLAIMS"); None otherwise.
-              Riot signals "no more pages" with 400 + errorCode=BAD_PARAMETER.
+              Riot signals "no more pages" with 400 + errorCode=BAD_PARAMETER
         """
         response = await self.fetch(
             "GET", "pd",
@@ -709,7 +707,7 @@ class RiotSession:
         )
         if response.status_code == 200:
             try:
-                return response.json(), 200, None  # pyright: ignore[reportAny]
+                return response.json(), 200, None 
             except ValueError:
                 return None, response.status_code, None
 
@@ -717,7 +715,7 @@ class RiotSession:
         try:
             body = response.json()  # pyright: ignore[reportAny]
             if isinstance(body, dict):
-                ec = body.get("errorCode")  # pyright: ignore[reportAny]
+                ec = body.get("errorCode")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
                 if isinstance(ec, str):
                     error_code = ec
         except ValueError:
@@ -731,7 +729,7 @@ class RiotSession:
             season_id (str): The competitive season/act UUID
             start_index (int): Index of the first entry to return. Defaults to 0
             size (int): How many entries per page, 510 is maximum. Defaults to 510
-            query (str | None, optional): Optional username filter. Defaults to None."""
+            query (str | None, optional): Optional username filter. Defaults to None"""
 
         params: dict[str, str] = {"startIndex": str(start_index), "size": str(size)}
         if query is not None:
@@ -752,7 +750,7 @@ class RiotSession:
         Called once during authentication so the season is available for the entire session.
 
         Returns:
-            The active act's season UUID, or empty string if not found.
+            The active act's season UUID, or empty string if not found
         """
         try:
             response = await self.fetch(
@@ -780,7 +778,7 @@ class RiotSession:
         return PresenceResponse(**response.json())  # pyright: ignore[reportAny]
 
     async def local_get_aliases(self) -> list[AccountAlias]:
-        """Fetch the player's name/tag alias history."""
+        """Fetch the player's name/tag alias history"""
         response = await self.fetch("GET", "local", EndpointURI("/player-account/aliases/v1/active"))
         data = response.json()  # pyright: ignore[reportAny]
         known = {f.name for f in fields(AccountAlias)}
@@ -788,19 +786,19 @@ class RiotSession:
         return [AccountAlias(**{k: v for k, v in alias.items() if k in known}) for alias in items]  # pyright: ignore[reportAny]
 
     async def local_get_friends(self) -> FriendResponse:
-        """Fetch the player's full friend list."""
+        """Fetch the player's full friend list"""
         response = await self.fetch("GET", "local", EndpointURI("/chat/v4/friends"))
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
         known = {f.name for f in fields(FriendResponse)}
         return FriendResponse(**{k: v for k, v in data.items() if k in known})  # pyright: ignore[reportAny]
 
     async def local_get_userinfo(self) -> UserInfoResponse:
-        """Fetch the authenticated user's account info (game name, tag, country, etc.)."""
+        """Fetch the authenticated user's account info (game name, tag, country, etc.)"""
         response = await self.fetch("GET", "local", EndpointURI("/rso-auth/v1/authorization/userinfo"))
         return UserInfoResponse(**response.json())  # pyright: ignore[reportAny]
 
     async def local_get_requests(self) -> FriendRequestsResponse:
-        """Fetch the player's pending friend requests (incoming and outgoing)."""
+        """Fetch the player's pending friend requests (incoming and outgoing)"""
         response = await self.fetch("GET", "local", EndpointURI("/chat/v4/friendrequests"))
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
         known = {f.name for f in fields(FriendRequestsResponse)}
@@ -812,7 +810,7 @@ class RiotSession:
         """Fetch the current pregame match ID for the authenticated player.
 
         Returns:
-            The pregame match ID string.
+            The pregame match ID string
         """
         response = await self.fetch("GET", "glz", EndpointURI(f"/pregame/v1/players/{self.puuid}"))
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
@@ -822,7 +820,7 @@ class RiotSession:
         """Fetch full pregame match data (agent select lobby).
 
         Args:
-            match_id: The pregame match UUID from pregame_get_player.
+            match_id: The pregame match UUID from pregame_get_player
         """
         response = await self.fetch("GET", "glz", EndpointURI(f"/pregame/v1/matches/{match_id}"))
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
@@ -835,7 +833,7 @@ class RiotSession:
         """Fetch the current ingame match ID for the authenticated player.
 
         Returns:
-            The ingame match ID string.
+            The ingame match ID string
         """
         response = await self.fetch("GET", "glz", EndpointURI(f"/core-game/v1/players/{self.puuid}"))
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
@@ -845,7 +843,7 @@ class RiotSession:
         """Fetch full ingame match data (active match).
 
         Args:
-            match_id: The ingame match UUID from ingame_get_player.
+            match_id: The ingame match UUID from ingame_get_player
         """
         response = await self.fetch("GET", "glz", EndpointURI(f"/core-game/v1/matches/{match_id}"))
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
@@ -856,7 +854,7 @@ class RiotSession:
         """Fetch all player loadouts for an active match.
 
         Args:
-            match_id: The ingame match UUID.
+            match_id: The ingame match UUID
         """
         response = await self.fetch("GET", "glz", EndpointURI(f"/core-game/v1/matches/{match_id}/loadouts"))
         data: dict[str, Any] = response.json()  # pyright: ignore[reportExplicitAny, reportAny]
@@ -885,7 +883,7 @@ class AuthHandler:
         self._register()
 
     def _register(self) -> None:
-        """Subscribe to relevant events."""
+        """Subscribe to relevant events"""
         _ = self.bus.on(Event.RSO_LOGIN, self._on_rso_login, priority=10)
         _ = self.bus.on(Event.RSO_LOGOUT, self._on_rso_logout, priority=10)
         _ = self.bus.on(Event.SHUTDOWN, self._on_shutdown, priority=0)
@@ -899,7 +897,7 @@ class AuthHandler:
         local_get_userinfo is available as soon as the Riot Client is
         running and the user is logged in (it does not require Valorant
         to be launched), so we fire USERINFO_FETCHED right after
-        AUTH_SUCCESS instead of waiting for the presence baseline.
+        AUTH_SUCCESS instead of waiting for the presence baseline
         """
 
         logger.info(f"Authenticating against {data.base_url} ...")

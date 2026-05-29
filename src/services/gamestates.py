@@ -1,10 +1,4 @@
-"""
-Game state tracker and data collector
-
-Monitors presence websocket events for sessionLoopState transitions,
-collects relevant data from the Riot API for each transition,
-and emits labeled DATA_COLLECTED events for downstream transport.
-"""
+"""game state tracker; monitors sessionLoopState transitions, collects Riot API data per state, emits events downstream"""
 
 from __future__ import annotations
 
@@ -38,21 +32,15 @@ from utils.models import (
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-# Lookup set for quick validation
+# lookup sets for quick validation
 _VALID_STATES: set[str] = {s.value for s in SessionLoopState}
 _ITEM_TYPE_IDS: set[str] = {s.value for s in ItemTypes}
 
 
 @dataclass(frozen=True, slots=True)
 class _GameModeRules:
-    """Defines when the collector should proactively pause for a game mode.
-
-    Pause when max(ally, enemy) >= target - threshold.
-    Threshold is based on ~1 minute of average scoring rate so we
-    stop collecting before the match ends and other apps need the budget.
-
-    always_paused modes (custom, deathmatch) never run the collector
-    because the user can leave at any time.
+    """game mode pause rules; pause when max(ally, enemy) >= target - threshold
+    (threshold ~ 1 min of scoring); always_paused modes never run the collector
     """
     target: int
     threshold: int = 1
@@ -80,15 +68,7 @@ _MENU_IDLE_TIMEOUT: float = 60.0
 _USERINFO_POLL_INTERVAL: float = 60.0
 
 class GamestateHandler:
-    """
-    Tracks sessionLoopState transitions and collects data for each.
-
-    Listens for:
-    - AUTH_SUCCESS      -> stores session (puuid + fetch capability)
-    - WEBSOCKET_EVENT   -> detects state changes, triggers collection
-    - VALORANT_CLOSED   -> resets state
-    - SHUTDOWN          -> resets state
-    """
+    """tracks sessionLoopState transitions and drives data collection for each state"""
 
     def __init__(
         self,
@@ -135,14 +115,10 @@ class GamestateHandler:
 
     @property
     def scheduler(self) -> RequestScheduler:
-        """The shared request scheduler. Exposed so other services
-        (e.g. SubmissionService) can enqueue task-priority Riot fetches
-        without standing up a second scheduler.
-        """
+        """shared request scheduler; exposed so other services (e.g. SubmissionService) can enqueue task-priority fetches"""
         return self._scheduler
 
     def _register(self) -> None:
-        """Subscribe to relevant events."""
         _ = self.bus.on(Event.AUTH_SUCCESS, self._on_auth_success, priority=5)
         _ = self.bus.on(Event.VALORANT_OPENED, self._on_valorant_open, priority=5)
         _ = self.bus.on(Event.WEBSOCKET_EVENT, self._on_websocket_event, priority=5)
@@ -153,13 +129,7 @@ class GamestateHandler:
     # ------------------- Event Handlers -------------------
 
     async def _on_auth_success(self, data: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
-        """Store the authenticated session,start match collection immediately
-
-        The match collector begins as soon as we're authenticated: no need
-        to wait for VALORANT to launch. 
-        If VALORANT opens later, the
-        scheduler is paused for 60s to let other apps do their thing
-        """
+        """store session and start match collector; if Valorant is already open, scheduler pauses 60s for other apps"""
         self._session = data["session"]
         self._scheduler.start()
         # TODO: Also start history collector and Competitive Updates collector
@@ -182,13 +152,7 @@ class GamestateHandler:
             self._presence_poll_task = asyncio.create_task(self._on_valorant_open_sequence())
 
     async def _on_valorant_open(self, data: LockfileData) -> None:  # pyright: ignore[reportUnusedParameter]
-        """Valorant launched -> pause scheduler for 60s, then poll for initial gamestate.
-
-        Pauses the match collector to let other apps (tracker.gg, etc.)
-        make their initial burst of requests without competing for rate
-        limit budget.  After the cooldown, polls /chat/v4/presences to
-        get the baseline sessionLoopState.
-        """
+        """Valorant launched -> pause scheduler 60s to yield rate-limit budget to other apps, then poll for initial gamestate"""
         self._valorant_open = True
         if self._session is None or self._current_state is not None:
             return
@@ -196,13 +160,7 @@ class GamestateHandler:
         self._presence_poll_task = asyncio.create_task(self._on_valorant_open_sequence())
 
     async def _on_valorant_open_sequence(self) -> None:
-        """Pause scheduler and poll for initial gamestate immediately
-
-        The presence endpoint is local (no rate limit), so we start
-        polling right away while the scheduler is paused.  Once the
-        initial state is found, _on_state_changed triggers the normal
-        state handler which waits its own offset and then resumes.
-        """
+        """pause scheduler and start presence polling; local endpoint has no rate limit so polling begins immediately"""
         if self._session is None:
             return
 
@@ -212,7 +170,7 @@ class GamestateHandler:
         await self._poll_initial_presence()
 
     async def _poll_initial_presence(self) -> None:
-        """Poll /chat/v4/presences until we find our own sessionLoopState."""
+        """poll /chat/v4/presences until we find our own sessionLoopState"""
         if self._session is None:
             return
 
@@ -234,9 +192,7 @@ class GamestateHandler:
                             new_state = SessionLoopState(state_str)
                             self._current_state = new_state
 
-                            # Set activity baseline from poll so menus
-                            # monitoring can detect changes from the
-                            # very first websocket event
+                            # set activity baseline so menu monitoring can detect changes from the first websocket event
                             if new_state == SessionLoopState.MENUS:
                                 private = p.private
                                 if isinstance(private, PresencePrivate):
@@ -269,7 +225,7 @@ class GamestateHandler:
             logger.debug("Presence polling stopped (session closed or state already set)")
 
     async def _on_websocket_event(self, data: PresenceWebsocketEvent) -> None:
-        """Check each presence event for a sessionLoopState change."""
+        """check each presence event for a sessionLoopState change"""
         if self._session is None:
             return
 
@@ -283,7 +239,7 @@ class GamestateHandler:
 
         new_state = SessionLoopState(new_state_str)
 
-        # No state change, but still process presence for active monitors
+        # no state change; still process presence for active monitors
         if new_state == self._current_state:
             private = presence.private
             if isinstance(private, PresencePrivate):
@@ -305,8 +261,7 @@ class GamestateHandler:
 
         if previous is None:
             logger.info(f"Baseline state set: {new_state.value}")
-            # Poll lost the race, set activity snapshot from this websocket
-            # event so menus monitoring has a baseline to compare against
+            # poll lost the race -> set activity snapshot from this websocket event
             if new_state == SessionLoopState.MENUS:
                 private = presence.private
                 if isinstance(private, PresencePrivate):
@@ -319,35 +274,27 @@ class GamestateHandler:
         await self._on_state_changed(transition)
 
     async def _on_valorant_close(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
-        """Valorant closed -> clear game-state tracking but keep match collector alive.
-
-        The session and match collector survive because the user is still
-        logged into the Riot Client. Only RSO_LOGOUT/SHUTDOWN kills those.
-        """
+        """Valorant closed -> clear game-state tracking but keep session and match collector alive"""
         self._valorant_open = False
         await self._clear_game_state()
 
     async def _on_rso_logout(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
-        """Riot Client logged out -> reset tracking state."""
+        """Riot Client logged out -> reset tracking state"""
         await self._reset()
 
     async def _on_shutdown(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
-        """App shutting down -> reset tracking state."""
+        """app shutting down -> reset tracking state"""
         await self._reset()
 
     # ------------------- State Change Dispatch -------------------
 
     async def _on_state_changed(self, transition: GameStateTransition) -> None:
-        """Dispatch to the appropriate handler based on the new state.
-
-        Cancels the pending offset-wait task and tells the scheduler to
-        purge stale state-bound requests before dispatching the new handler.
-        """
+        """cancel pending tasks, purge stale scheduled requests, then dispatch to the appropriate state handler"""
         self._cancel_pending_task()
         self._cancel_pregame_poll()
         self._cancel_menu_idle_timer()
         self._active_queue_id = None
-        # This makes the state queue be cleared and go to sleep
+        # clear state queue and pause scheduler
         self._scheduler.on_state_change()
 
         if transition.previous == SessionLoopState.PREGAME:
@@ -360,7 +307,7 @@ class GamestateHandler:
         elif transition.current == SessionLoopState.INGAME:
             _ = await self.bus.emit(Event.MATCH_STARTED)
 
-        # First presence received -> fetch account aliases once
+        # first presence received -> fetch account aliases once
         if transition.previous is None:
             _ = asyncio.create_task(self._fetch_account_aliases())
 
@@ -373,13 +320,7 @@ class GamestateHandler:
                 self._pending_task = asyncio.create_task(self._on_enter_ingame(transition))
 
     async def _on_enter_menus(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
-        """Player entered menus.
-
-        Pauses the collector and starts the 60s idle timer.
-        The timer IS the rate-limit offset, when it fires, the
-        collector resumes in aggressive mode and general checks
-        are enqueued. Any user activity resets the timer.
-        """
+        """player entered menus -> pause collector and start 60s idle timer; activity resets it, expiry resumes collector"""
         if not self._session:
             return
 
@@ -387,54 +328,38 @@ class GamestateHandler:
         self._reset_menu_idle_timer()
 
     async def _on_enter_pregame(self, transition: GameStateTransition) -> None:  # pyright: ignore[reportUnusedParameter]
-        """Player entered agent select.
-
-        GLZ endpoints are not rate-limited, so we spawn a 1s
-        polling coroutine that runs independently of the scheduler.
-
-        The collector stays paused for the entire pregame (~80s).
-        Pregame is a highly competed window and not worth risking
-        rate limits for other apps.
-        """
+        """player entered agent select -> pause collector for ~80s, start GLZ pregame polling (not rate-limited)"""
         if not self._session:
             return
 
         self._pause_collector(Event.COLLECTOR_PAUSED_PREGAME)
 
-        # GLZ endpoints are not rate-limited, poll independently
+        # GLZ not rate-limited, poll independently
         self._pregame_poll_task = asyncio.create_task(self._poll_pregame_match())
 
     async def _on_enter_ingame(self, transition: GameStateTransition) -> None:
-        """Match started (loading screen / gameplay).
-
-        GLZ ingame endpoints are not rate-limited, so we fetch the match
-        data once directly and store the match ID for the duration of the
-        match. Score monitoring from presence data will pause/resume
-        the collector as match point approaches.
-
-        The queue ID is extracted from the transition presence to look up
-        the game mode rules for match point detection.
-        """
+        """match started -> fetch GLZ data (not rate-limited), wait ratelimit offset, resume collector;
+        score monitoring via presence pauses/resumes based on game mode rules"""
         if not self._session:
             return
 
-        # Determine the game mode for score monitoring
+        # determine the game mode for score monitoring
         private = transition.presence.private if transition.presence else None
         if isinstance(private, PresencePrivate):
             self._active_queue_id = private.queueId
 
         rules = _GAME_MODE_RULES.get(self._active_queue_id or "")
 
-        # Always-paused modes (custom, deathmatch): never run the collector
+        # always-paused modes (custom, deathmatch): never run the collector
         if rules and rules.always_paused:
             self._pause_collector(Event.COLLECTOR_PAUSED_MATCH_POINT)
             logger.info(f"Collector stays paused for always-paused mode: {self._active_queue_id}")
-            # Still fetch GLZ data (not rate-limited)
+            # still fetch GLZ data (not rate-limited)
             await self._fetch_ingame_match()
             await self._fetch_ingame_loadouts()
             return
 
-        # GLZ endpoints are not rate-limited, fetch directly
+        # GLZ not rate-limited, fetch directly
         await self._fetch_ingame_match()
         await self._fetch_ingame_loadouts()
 
@@ -452,11 +377,7 @@ class GamestateHandler:
         event: Event,
         label: str,
     ) -> None:
-        """Generic check-diff-emit pattern.
-
-        Fetches data, compares a key value against the cached one,
-        and emits an event if it changed.
-        """
+        """fetch data, compare key against cache, emit event if changed"""
         if not self._session:
             return
 
@@ -487,12 +408,7 @@ class GamestateHandler:
         logger.info("Rate limit cooldown finished, collecting data")
 
     def _enqueue_general_checks(self) -> None:
-        """Enqueue all general-purpose data checks onto the unlimited userinfo queue.
-
-        These endpoints have no Riot rate-limit, so they run independently of
-        the paced match-details/match-history workers. Driven on a 60s timer
-        by `_poll_userinfo` starting at AUTH_SUCCESS.
-        """
+        """enqueue all general-purpose data checks onto the unlimited userinfo queue (no Riot rate-limit)"""
         self._scheduler.enqueue_userinfo(self._check_owned, "owned items")
         self._scheduler.enqueue_userinfo(self._check_loadout, "loadout")
         self._scheduler.enqueue_userinfo(self._check_xp, "xp")
@@ -500,13 +416,7 @@ class GamestateHandler:
         self._scheduler.enqueue_userinfo(self._check_balances, "balances")
 
     async def _poll_userinfo(self) -> None:
-        """Re-enqueue all userinfo checks every minute.
-
-        Userinfo endpoints have no Riot rate-limit, so the cadence is decoupled
-        from game-state transitions — they refresh on a steady schedule whether
-        the player is in menus, agent select, mid-match, or AFK.
-        Each `_check_*` is a diff-and-emit no-op when nothing has changed.
-        """
+        """re-enqueue userinfo checks every 60s; runs independently of game-state transitions"""
         while self._session is not None:
             self._enqueue_general_checks()
             try:
@@ -517,7 +427,7 @@ class GamestateHandler:
     # ------------------- Proactive Collector Pause/Resume -------------------
 
     def _pause_collector(self, event: Event) -> None:
-        """Pause the scheduler and emit a diagnostic event."""
+        """pause the scheduler and emit a diagnostic event"""
         if not self._collector_paused:
             self._collector_paused = True
             self._scheduler.pause()
@@ -525,7 +435,7 @@ class GamestateHandler:
             logger.info(f"Collector paused: {event.value}")
 
     def _resume_collector(self, event: Event) -> None:
-        """Resume the scheduler and emit a diagnostic event."""
+        """resume the scheduler and emit a diagnostic event"""
         if self._collector_paused:
             self._collector_paused = False
             self._scheduler.resume()
@@ -533,14 +443,14 @@ class GamestateHandler:
             logger.info(f"Collector resumed: {event.value}")
 
     def _process_presence_for_state(self, private: PresencePrivate) -> None:
-        """Route presence updates to the appropriate monitor for the current state."""
+        """route presence updates to the appropriate monitor for the current state"""
         if self._current_state == SessionLoopState.INGAME:
             self._on_ingame_score_update(private)
         elif self._current_state == SessionLoopState.MENUS:
             self._on_menus_presence_update(private)
 
     def _on_ingame_score_update(self, private: PresencePrivate) -> None:
-        """Check presence scores against game mode rules for match point detection."""
+        """check presence scores against game mode rules for match point detection"""
         ally = private.partyOwnerMatchScoreAllyTeam
         enemy = private.partyOwnerMatchScoreEnemyTeam
         if ally is None or enemy is None:
@@ -557,17 +467,11 @@ class GamestateHandler:
 
     @staticmethod
     def _is_near_end(ally: int, enemy: int, rules: _GameModeRules) -> bool:
-        """True when either team is close enough to winning that we should stop collecting."""
+        """true when max(ally, enemy) >= target - threshold -> time to stop collecting"""
         return max(ally, enemy) >= rules.target - rules.threshold
 
     def _on_menus_presence_update(self, private: PresencePrivate) -> None:
-        """Manage collector pause/resume in menus based on user activity.
-
-        Three rules:
-        1. User activity always resets the 60s idle timer.
-        2. While in queue (MATCHMAKING), collector stays paused.
-        3. Leaving queue counts as activity (rule 1).
-        """
+        """pause collector on any activity or MATCHMAKING; leaving queue resets the 60s idle timer"""
         party = private.partyPresenceData
         in_queue = isinstance(party, _PartyPresenceData) and party.partyState == "MATCHMAKING"
 
@@ -583,8 +487,7 @@ class GamestateHandler:
             already_paused = self._collector_paused
             logger.info("Menu activity detected, resetting idle timer")
             self._pause_collector(Event.COLLECTOR_PAUSED_USER_ACTIVITY)
-            # _pause_collector is idempotent, if already paused (e.g.
-            # leaving queue), emit explicitly so the event log shows it
+            # _pause_collector is idempotent; emit explicitly so the event log shows leaving-queue pauses
             if already_paused:
                 _ = asyncio.ensure_future(self.bus.emit(Event.COLLECTOR_PAUSED_USER_ACTIVITY))
             self._reset_menu_idle_timer()
@@ -593,7 +496,7 @@ class GamestateHandler:
 
     @staticmethod
     def _build_activity_snapshot(private: PresencePrivate) -> dict[str, object]:
-        """Extract fields that indicate user activity in menus."""
+        """extract fields that indicate user activity in menus"""
         party = private.partyPresenceData
         return {
             "queueId": private.queueId,
@@ -605,23 +508,19 @@ class GamestateHandler:
         }
 
     def _reset_menu_idle_timer(self) -> None:
-        """Cancel any existing idle timer and start a new one."""
+        """cancel any existing idle timer and start a new one"""
         self._cancel_menu_idle_timer()
         loop = asyncio.get_running_loop()
         self._menu_idle_timer = loop.call_later(_MENU_IDLE_TIMEOUT, self._on_menu_idle_expired)
 
     def _cancel_menu_idle_timer(self) -> None:
-        """Cancel the menu idle timer if running."""
+        """cancel the menu idle timer if running"""
         if self._menu_idle_timer is not None:
             self._menu_idle_timer.cancel()
             self._menu_idle_timer = None
 
     def _on_menu_idle_expired(self) -> None:
-        """Called after 60s of no user activity in menus.
-
-        Resume the collector in aggressive mode and enqueue general
-        checks. The idle timer serves as the rate-limit offset.
-        """
+        """60s of menu inactivity -> resume collector (idle timer doubles as rate-limit offset)"""
         logger.info(f"Menu idle timer fired (state={self._current_state}, paused={self._collector_paused})")
         if self._current_state == SessionLoopState.MENUS:
             self._resume_collector(Event.COLLECTOR_RESUMED_IDLE)
@@ -629,7 +528,7 @@ class GamestateHandler:
     # ------------------- Helpers -------------------
 
     def _find_own_presence(self, event: PresenceWebsocketEvent) -> Presence | None:
-        """Find the presence entry matching our puuid."""
+        """find the presence entry matching our puuid"""
         presences = event.data.data.presences
         if not presences:
             return None
@@ -644,7 +543,7 @@ class GamestateHandler:
 
     @staticmethod
     def _extract_loop_state(presence: Presence) -> str | None:
-        """Extract sessionLoopState from a presence object."""
+        """extract sessionLoopState from a presence object"""
         private: PresencePrivate | str | None = presence.private
         if not isinstance(private, PresencePrivate):
             return None
@@ -656,34 +555,29 @@ class GamestateHandler:
         return match_data.sessionLoopState or None
 
     def _cancel_pending_task(self) -> None:
-        """Cancel any in-flight delayed collection task."""
+        """cancel any in-flight delayed collection task"""
         if self._pending_task and not self._pending_task.done():
             _ = self._pending_task.cancel()
             logger.info("Cancelled pending data collection (state changed)")
         self._pending_task = None
 
     def _cancel_pregame_poll(self) -> None:
-        """Cancel the pregame polling coroutine if running"""
+        """cancel the pregame polling task if running"""
         if self._pregame_poll_task and not self._pregame_poll_task.done():
             _ = self._pregame_poll_task.cancel()
         self._pregame_poll_task = None
 
     async def _clear_game_state(self) -> None:
-        """Clear game-state tracking without touching the session or match collector.
-
-        Used when Valorant closes but the Riot Client is still logged in.
-        The match collector keeps running so it can continue fetching
-        match history while the user is AFK in the Riot Client.
-        """
+        """clear game-state without touching session/match collector (used when Valorant closes but Riot Client stays open)"""
         if self._presence_poll_task and not self._presence_poll_task.done():
             _ = self._presence_poll_task.cancel()
             self._presence_poll_task = None
         self._cancel_pregame_poll()
         self._cancel_menu_idle_timer()
         self._last_activity_snapshot = None
-        # Purge state-bound requests but keep the scheduler alive
+        # purge state-bound requests but keep the scheduler alive
         self._scheduler.on_state_change()
-        # Resume immediately so the match collector's paced requests keep flowing
+        # resume so the match collector's paced requests keep flowing
         self._collector_paused = False
         self._scheduler.resume()
         self._cancel_pending_task()
@@ -704,10 +598,7 @@ class GamestateHandler:
         self._balances_snapshot = None
 
     async def _reset(self) -> None:
-        """Full teardown: clear everything including session and match collector.
-
-        Used on RSO_LOGOUT and SHUTDOWN when the session is no longer valid.
-        """
+        """full teardown including session and match collector; used on RSO_LOGOUT/SHUTDOWN"""
         await self._clear_game_state()
         if self._store_poll_task and not self._store_poll_task.done():
             _ = self._store_poll_task.cancel()
@@ -726,14 +617,8 @@ class GamestateHandler:
 # ---------------- Helper API Wrapper Functions ----------------
 
     async def _poll_pregame_match(self) -> None:
-        """Poll pregame match data at 1s intervals (GLZ is not rate-limited)
-
-        Gets the match ID once, then polls the match endpoint every second
-        
-        Emits PREGAME_MATCH_UPDATED whenever the 'Version' field changes
-        
-        Stops on 404 (pregame ended server-side) or cancellation (state change)
-        """
+        """poll pregame match at 0.1s intervals (GLZ not rate-limited); emits PREGAME_MATCH_UPDATED on Version change;
+        stops on 404 (pregame ended) or cancellation"""
         
         if not self._session:
             return
@@ -772,11 +657,7 @@ class GamestateHandler:
             logger.warning(f"Pregame poll failed: {type(e).__name__}: {e}")
 
     async def _fetch_ingame_match(self) -> None:
-        """Fetch ingame match data once (GLZ is not rate-limited).
-
-        Gets the match ID, stores it on self.active_match_id, fetches
-        the full match data, and emits INGAME_MATCH_UPDATED.
-        """
+        """fetch ingame match data once (GLZ not rate-limited); stores match ID and emits INGAME_MATCH_UPDATED"""
         if not self._session:
             return
 
@@ -794,11 +675,7 @@ class GamestateHandler:
             logger.warning(f"Failed to fetch ingame match: {type(e).__name__}: {e}")
 
     async def _fetch_ingame_loadouts(self) -> None:
-        """Fetch player loadouts for the active match (GLZ is not rate-limited).
-
-        Retries with a 2s delay until successful, match ends, or cancelled.
-        This is the most valuable data, we never give up while the match is active.
-        """
+        """fetch player loadouts for the active match (GLZ not rate-limited); retries every 2s until success or match ends"""
         if not self._session or not self.active_match_id:
             return
 
@@ -820,13 +697,13 @@ class GamestateHandler:
                 logger.warning(f"Failed to fetch ingame loadouts: {type(e).__name__}: {e}, retrying in 2s")
                 await asyncio.sleep(2)
 
-                # Check if match is still active (state may have changed during sleep)
+                # check if match is still active (state may have changed during sleep)
                 if self.active_match_id != match_id:
                     logger.info("Ingame loadouts fetch aborted: match ended")
                     return
 
     async def _fetch_account_aliases(self) -> None:
-        """Fetch the player's name/tag alias history once (local, not rate-limited)."""
+        """fetch the player's name/tag alias history once (local, not rate-limited)"""
         if not self._session:
             return
 
@@ -838,7 +715,7 @@ class GamestateHandler:
             logger.warning(f"Failed to fetch account aliases: {type(e).__name__}: {e}")
 
     async def _check_loadout(self) -> None:
-        """Checks whether the user has updated their loadout."""
+        """emit LOADOUT_UPDATED if loadout Version changed"""
         await self._check_and_emit(
             fetch=self._session.general_get_loadout,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda loadout: loadout.Version,
@@ -848,7 +725,7 @@ class GamestateHandler:
         )
 
     async def _check_owned(self) -> None:
-        """Checks whether the user has acquired new items."""
+        """emit OWNED_ITEMS_UPDATED if owned item count changed"""
         await self._check_and_emit(
             fetch=self._session.general_get_owned,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda ownedItems: ownedItems.item_count,
@@ -858,7 +735,7 @@ class GamestateHandler:
         )
     
     async def _check_xp(self) -> None:
-        """Checks whether the user has gained XP"""
+        """emit USER_XP_UPDATED if xp Version changed"""
         await self._check_and_emit(
             fetch=self._session.general_get_xp,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda levelData: levelData.Version,
@@ -868,7 +745,7 @@ class GamestateHandler:
         )
 
     async def _check_penalties(self) -> None:
-        """Checks whether the user has new penalties"""
+        """emit PENALTIES_UPDATED if penalties Version changed"""
         await self._check_and_emit(
             fetch=self._session.general_get_penalties,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda penaltiesData: penaltiesData.Version,
@@ -878,9 +755,7 @@ class GamestateHandler:
         )
     
     async def _check_balances(self) -> None:
-        """Checks whether the user's wallet balances have changed.
-
-        Balances has no Version field — compare the dict itself."""
+        """emit BALANCES_UPDATED if wallet balances changed (no Version field -> compares dict directly)"""
         await self._check_and_emit(
             fetch=self._session.general_get_balances,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda balances: balances.Balances,
@@ -890,7 +765,7 @@ class GamestateHandler:
         )
 
     async def _check_mmr(self) -> None:
-        """Checks whether the user's MMR history has updated"""
+        """emit MMR_HISTORY_UPDATED if mmr Version changed"""
         await self._check_and_emit(
             fetch=self._session.general_get_mmr,  # pyright: ignore[reportOptionalMemberAccess]
             get_key=lambda mmrData: mmrData.Version,
@@ -900,7 +775,7 @@ class GamestateHandler:
         )
         
     async def _fetch_initial_friends(self) -> None:
-        """Fetch the full friend list once after the first presence is received."""
+        """fetch the full friend list once after first presence is received"""
         if not self._session:
             return
         try:
@@ -910,11 +785,7 @@ class GamestateHandler:
             logger.warning("Failed to fetch initial friend list", exc_info=True)
 
     async def _poll_store(self) -> None:
-        """Fetch the storefront, emit, then sleep until the offers rotate. Repeats until cancelled.
-
-        The actual API call is enqueued through the scheduler so it
-        counts against the shared rate-limit budget.
-        """
+        """fetch storefront, emit STORE_OFFERS_UPDATED, then sleep until next rotation; repeats until cancelled"""
         if not self._session:
             return
 

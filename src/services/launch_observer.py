@@ -1,30 +1,12 @@
-"""
-Monitors the Riot Client login state and Valorant process
+"""two independent watchers for Riot Client login state and Valorant process.
 
-Two independent watchers:
+RiotClientWatcher: polls lockfile + /rso-auth/v1/authorization
+    LOGGED_OUT (RSO 200)              -> LOGGED_IN  -> emit RSO_LOGIN
+    LOGGED_IN  (RSO non-200/no lockfile) -> LOGGED_OUT -> emit RSO_LOGOUT
 
-RiotClientWatcher
-    Watches the lockfile for changes and polls '/rso-auth/v1/authorization'
-    to detect login/logout.This is the earliest signal that API requests
-    can begin => no need to wait for Valorant to launch anymore
-
-    State machine:
-        LOGGED_OUT (lockfile exists + RSO 200) => LOGGED_IN
-                    emit(RSO_LOGIN, lockfile_data)
-
-        LOGGED_IN (RSO non-200 / lockfile gone) => LOGGED_OUT
-                   emit(RSO_LOGOUT)
-
-ProcessWatcher
-    Polls for the VALORANT process to detect game open/close
-    Used by websocket and gamestate handlers that need the game running.
-
-    State machine:
-        NOT_RUNNING (process found) => RUNNING
-                     emit(VALORANT_OPENED, lockfile_data)
-
-        RUNNING (process gone) => NOT_RUNNING
-                 emit(VALORANT_CLOSED)
+ProcessWatcher: polls for the VALORANT process
+    NOT_RUNNING (process found) -> RUNNING     -> emit VALORANT_OPENED
+    RUNNING     (process gone)  -> NOT_RUNNING -> emit VALORANT_CLOSED
 """
 
 from __future__ import annotations
@@ -43,18 +25,10 @@ from services.event_bus import EventBus, Event
 
 logger = logging.getLogger(__name__)
 
-# -- Process lookup (cross-platform via psutil) --------------------------------
+# process lookup (cross-platform via psutil)
 
 def find_process_by_names(names: set[str]) -> psutil.Process | None:
-    """Search for a running process by a set of possible names.
-       Returns the first match or `None`.
-
-    Args:
-        names (set[str]): A set of possible process names
-
-    Returns:
-        psutil.Process | None: Either returns a process instance or `None`
-    """
+    """search for a running process by name set; returns first match or None"""
     for proc in psutil.process_iter(["name"]):
         try:
             if proc.info["name"] in names:
@@ -77,16 +51,7 @@ async def read_lockfile_with_retry(
     max_retries: int = 10,
     delay: float = 1.0,
 ) -> LockfileData | None:
-    """Attempt to read the lockfile with retries.
-
-    Args:
-        path: The lockfile path
-        max_retries: Maximum number of attempts
-        delay: Seconds between retries
-
-    Returns:
-        LockfileData | None
-    """
+    """read the lockfile with retries; returns None if unreadable after max_retries attempts"""
     for attempt in range(max_retries):
         try:
             if path.exists() and path.stat().st_size > 0:
@@ -104,14 +69,7 @@ async def read_lockfile_with_retry(
 
 
 class RiotClientWatcher:
-    """
-    Watches the Riot Client lockfile and polls '/rso-auth/v1/authorization'
-    to detect when the user logs in or out
-
-    This replaces process-based VALORANT detection as the trigger for
-    authentication => API requests can begin as soon as the user is
-    logged into the riot client, without VALORANT needing to be open
-    """
+    """watches lockfile + polls /rso-auth/v1/authorization for login/logout; login signal available before Valorant launches"""
 
     def __init__(
         self,
@@ -130,14 +88,14 @@ class RiotClientWatcher:
         self._task: asyncio.Task[None] | None = None
 
     async def start_polling(self) -> None:
-        """Start the polling loop as a background task."""
+        """start the polling loop as a background task"""
         logger.info(
             f"RiotClientWatcher started (interval: {self.poll_interval}s, lockfile: {self.lockfile_path})"
         )
         self._task = asyncio.create_task(self._poll_loop())
 
     async def stop_polling(self) -> None:
-        """Stop the polling loop and clean up."""
+        """stop the polling loop and clean up"""
         if self._task and not self._task.done():
             _ = self._task.cancel()
             try:
@@ -149,7 +107,7 @@ class RiotClientWatcher:
         logger.info("RiotClientWatcher stopped")
 
     async def _poll_loop(self) -> None:
-        """Main polling loop: check lockfile, then probe RSO endpoint"""
+        """main polling loop: check lockfile, then probe RSO endpoint"""
         
         try:
             while True:
@@ -160,10 +118,10 @@ class RiotClientWatcher:
             raise
 
     async def _poll_once(self) -> None:
-        """Single poll iteration: read lockfile, check RSO auth state"""
+        """single poll iteration: read lockfile, check RSO auth state"""
         
 
-        # Step 1: Check lockfile
+        # step 1: check lockfile
         if not self.lockfile_path.exists():
             if self._logged_in:
                 await self._transition_logout()
@@ -171,7 +129,7 @@ class RiotClientWatcher:
             self._last_lockfile_content = ""
             return
 
-        # Step 2: Read lockfile, detect changes
+        # step 2: read lockfile, detect changes
         try:
             content = self.lockfile_path.read_text(encoding="utf-8").strip()
         except (PermissionError, OSError):
@@ -188,25 +146,25 @@ class RiotClientWatcher:
                 logger.debug(f"Lockfile not ready: {e}")
                 return
 
-            # Lockfile changed => rebuild the httpx client
+            # lockfile changed -> rebuild the httpx client
             await self._close_client()
             self._client = httpx.AsyncClient(verify=False, timeout=5)
 
-            # If we were logged in with old credentials, force re-check
+            # if logged in with old credentials, force re-check
             if self._logged_in:
                 await self._transition_logout()
 
         if not self._lockfile or not self._client:
             return
 
-        # Step 3: Probe /rso-auth/v1/authorization
+        # step 3: probe /rso-auth/v1/authorization
         try:
             response = await self._client.get(
                 f"{self._lockfile.base_url}/rso-auth/v1/authorization",
                 headers={"Authorization": self._lockfile.auth_header},
             )
         except (httpx.ConnectError, httpx.ReadError, httpx.WriteError):
-            # Client is shutting down or not ready
+            # client shutting down or not ready
             if self._logged_in:
                 await self._transition_logout()
             return
@@ -219,13 +177,13 @@ class RiotClientWatcher:
             await self._transition_logout()
 
     async def _transition_login(self) -> None:
-        """User just logged in => emit RSO_LOGIN with lockfile data"""
+        """user logged in -> emit RSO_LOGIN with lockfile data"""
         self._logged_in = True
         logger.info("RSO login detected")
         _ = await self.bus.emit(Event.RSO_LOGIN, self._lockfile)
 
     async def _transition_logout(self) -> None:
-        """User just logged out => emit RSO_LOGOUT"""
+        """user logged out -> emit RSO_LOGOUT"""
         
         self._logged_in = False
         logger.info("RSO logout detected")
@@ -238,12 +196,7 @@ class RiotClientWatcher:
 
 
 class ProcessWatcher:
-    """
-    Polls for the VALORANT process to detect game open/close.+
-
-    Used by websocket and gamestate handlers that need the actual
-    game running (presence data, in-game state tracking)
-    """
+    """polls for the VALORANT process to detect game open/close; used by WebSocket and gamestate handlers"""
 
     def __init__(
         self,
@@ -259,14 +212,14 @@ class ProcessWatcher:
         self._task: asyncio.Task[None] | None = None
 
     async def start_polling(self) -> None:
-        """Start the polling loop as a background task"""
+        """start the polling loop as a background task"""
         logger.info(
             f"ProcessWatcher started (interval: {self.poll_interval}s)"
         )
         self._task = asyncio.create_task(self._poll_loop())
 
     async def stop_polling(self) -> None:
-        """Stop the polling loop"""
+        """stop the polling loop"""
         if self._task and not self._task.done():
             _ = self._task.cancel()
             try:
@@ -277,7 +230,7 @@ class ProcessWatcher:
         logger.info("ProcessWatcher stopped")
 
     async def _poll_loop(self) -> None:
-        """Check process status at regular intervals"""
+        """check process status at regular intervals"""
         try:
             while True:
                 valorant_running: bool = is_valorant_running()

@@ -1,17 +1,7 @@
-"""
-Session lifetime service.
+"""session lifetime service; maintains an app-scoped backend session with 30s pings.
 
-Maintains a live session against the backend so the server knows when the
-watcher is running and what state the client is in.  All endpoints are
-app-scoped (Authorization: Bearer <app-access-token>).
-
-Lifecycle:
-  1. Open session once the app token is available.
-  2. Flush any states that fired before the token was ready.
-  3. Emit state-change events as they happen (not on a timer).
-  4. Ping every 30 s to prove liveness.
-  5. End session on clean shutdown.
-  6. Re-open on 404 / 410.
+lifecycle: open on app token -> flush pending states -> emit state changes as events fire ->
+ping every 30s -> end on shutdown; re-open on 404/410.
 """
 
 from __future__ import annotations
@@ -53,15 +43,15 @@ class SessionService:
         bus: EventBus,
         backend: BackendCommunicationService,
     ) -> None:
-        self._bus = bus
-        self._backend = backend
+        self._bus = bus  # pyright: ignore[reportUnannotatedClassAttribute]
+        self._backend = backend  # pyright: ignore[reportUnannotatedClassAttribute]
         self._client: httpx.AsyncClient = httpx.AsyncClient(timeout=10.0)
 
         self._session_id: str | None = None
         self._last_state: str | None = None
         self._pending_states: list[str] = []
         self._ping_task: asyncio.Task[None] | None = None
-        self._cancelled = asyncio.Event()
+        self._cancelled = asyncio.Event()  # pyright: ignore[reportUnannotatedClassAttribute]
 
         self._register()
 
@@ -108,7 +98,7 @@ class SessionService:
         token = self._backend.app_access_token
         if token:
             try:
-                await self._client.post(
+                _ = await self._client.post(
                     f"{self._backend.base_url}/v1/sessions/{self._session_id}/end",
                     headers={"Authorization": f"Bearer {token}"},
                 )
@@ -178,7 +168,7 @@ class SessionService:
     async def _ping_loop(self) -> None:
         while not self._cancelled.is_set():
             try:
-                await asyncio.wait_for(self._cancelled.wait(), timeout=_PING_INTERVAL)
+                _ = await asyncio.wait_for(self._cancelled.wait(), timeout=_PING_INTERVAL)
                 return
             except asyncio.TimeoutError:
                 pass

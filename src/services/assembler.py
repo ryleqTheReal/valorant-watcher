@@ -1,15 +1,3 @@
-"""
-Assembler module: aggregates paginated Riot responses into single payloads.
-
-Today this module exposes HistoryAssembler, which probes match-history
-page 0, fans out the remaining pages into the request scheduler, merges
-the results in arrival order, and emits Event.MATCH_HISTORY_FETCHED
-exactly once per assembly (success or failure).
-
-A future CompetitiveUpdateAssembler will live alongside it once that
-endpoint is wired up — see docs/TODO_COMPETITIVE_UPDATES.md.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -45,7 +33,7 @@ class _HistoryAssembly:
     priority: Priority
     future: asyncio.Future[MatchHistoryEvent]
     max_pages: int | None
-    pages: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    pages: dict[int, list[dict[str, Any]]] = field(default_factory=dict)  # pyright: ignore[reportExplicitAny]
     max_total: int = 0
     max_end_index: int = 0
     failed_status: int | None = None
@@ -62,27 +50,27 @@ class HistoryAssembler:
     MATCH_HISTORY_FETCHED on completion.
 
     Concurrent assemble() calls on the same instance are serialized
-    via an internal asyncio.Lock — assembly N+1 only begins once
+    via an internal asyncio.Lock. assembly N+1 only begins once
     assembly N has finalized. This prevents the queue from filling
     up with partial assemblies sharing pacer slots.
 
-    429s do NOT count as failure: the affected page re-enqueues itself
+    429 does NOT count as failure: the affected page re-enqueues itself
     and the assembly stays open until it resolves.
 
     Priority is per-call so the same assembler instance can serve
-    server tasks ("task"), the collector's own account ("dig" — gap
+    server tasks ("task"), the collector's own account ("dig" -> gap
     filler), and DFS dig walks ("dig").
     """
 
     def __init__(
         self,
-        session: Any,  # RiotSession (typed Any to avoid import cycle)
+        session: Any,  # RiotSession (typed Any to avoid import cycle)  # pyright: ignore[reportExplicitAny, reportAny]
         scheduler: RequestScheduler,
         bus: EventBus,
         *,
         page_size: int = HISTORY_PAGE_SIZE,
     ) -> None:
-        self._session: Any = session
+        self._session: Any = session  # pyright: ignore[reportExplicitAny]
         self._scheduler: RequestScheduler = scheduler
         self._bus: EventBus = bus
         self._page_size: int = page_size
@@ -98,7 +86,7 @@ class HistoryAssembler:
     ) -> MatchHistoryEvent:
         """Assemble a player's match history and emit MATCH_HISTORY_FETCHED.
 
-        Concurrent calls serialize — N+1 waits for N to finalize before
+        Concurrent calls serialize -> N+1 waits for N to finalize before
         enqueueing its first page.
 
         Args:
@@ -143,10 +131,10 @@ class HistoryAssembler:
         # raise "Cannot send a request, as the client has been closed."
         if self._session.client.is_closed:  # pyright: ignore[reportAny]
             if not asm.future.done():
-                asm.future.cancel()
+                _ = asm.future.cancel()
             return
         try:
-            _parsed, raw, status = await self._session.general_get_history_raw(
+            _parsed, raw, status = await self._session.general_get_history_raw(  # pyright: ignore[reportAny]
                 asm.puuid, start_index=start, end_index=end, shard=asm.shard,
             )
         except Exception:  # noqa: BLE001
@@ -168,11 +156,11 @@ class HistoryAssembler:
             await self._finalize(asm)
             return
 
-        history_entries = raw.get("History") or []
+        history_entries = raw.get("History") or []  # pyright: ignore[reportUnknownVariableType, reportAny]
         total = int(raw.get("Total", 0))  # pyright: ignore[reportAny]
         end_index_val = int(raw.get("EndIndex", end))  # pyright: ignore[reportAny]
 
-        page_list = history_entries if isinstance(history_entries, list) else []
+        page_list = history_entries if isinstance(history_entries, list) else []  # pyright: ignore[reportUnknownVariableType]
         asm.pages[start] = page_list
         asm.pages_fetched += 1
         if total > asm.max_total:
@@ -186,7 +174,7 @@ class HistoryAssembler:
         if total > 0 and next_start >= total:
             await self._finalize(asm)
             return
-        if len(page_list) < self._page_size:
+        if len(page_list) < self._page_size:  # pyright: ignore[reportUnknownArgumentType]
             await self._finalize(asm)
             return
         if asm.max_pages is not None and asm.pages_fetched >= asm.max_pages:
@@ -217,15 +205,15 @@ class HistoryAssembler:
                 match_history=None,
                 fetch_time_ms=fetch_time_ms,
             )
-            await self._bus.emit(Event.MATCH_HISTORY_FETCHED, event)
+            _ = await self._bus.emit(Event.MATCH_HISTORY_FETCHED, event)
             asm.future.set_result(event)
             return
 
-        merged: list[dict[str, Any]] = []
+        merged: list[dict[str, Any]] = []  # pyright: ignore[reportExplicitAny]
         for page_start in sorted(asm.pages.keys()):
             merged.extend(asm.pages[page_start])
 
-        full_payload: dict[str, Any] = {
+        full_payload: dict[str, Any] = {  # pyright: ignore[reportExplicitAny]
             "Subject": asm.puuid,
             "BeginIndex": 0,
             "EndIndex": asm.max_end_index,
@@ -233,7 +221,7 @@ class HistoryAssembler:
             "History": merged,
         }
         logger.info(
-            f"Assembly complete for {asm.puuid[:8]} on {asm.shard}: "
+            f"Assembly complete for {asm.puuid[:8]} on {asm.shard}: "  # pyright: ignore[reportImplicitStringConcatenation]
             f"{len(merged)} entries (Total={asm.max_total}, EndIndex={asm.max_end_index})"
         )
         event = MatchHistoryEvent(
@@ -243,7 +231,7 @@ class HistoryAssembler:
             match_history=full_payload,
             fetch_time_ms=fetch_time_ms,
         )
-        await self._bus.emit(Event.MATCH_HISTORY_FETCHED, event)
+        _ = await self._bus.emit(Event.MATCH_HISTORY_FETCHED, event)
         asm.future.set_result(event)
 
 
@@ -266,51 +254,27 @@ class _CompetitiveUpdateAssembly:
 
 
 class CompetitiveUpdateAssembler:
-    """Drives sequential competitive-updates pagination via the scheduler.
+    """Paginates /mmr/v1/players/{puuid}/competitiveupdates 20-by-20 (no total count returned).
 
-    Riot's GET /mmr/v1/players/{puuid}/competitiveupdates endpoint does
-    NOT return Total/StartIndex/EndIndex, so we cannot fan out pages the
-    way HistoryAssembler does. We walk 20-by-20 instead, stopping when
-    either:
-
-      - a page contains < 20 entries (last page reached), OR
-      - the server returns 400 with errorCode == "BAD_PARAMETER"
-        (Riot's "no more pages" signal).
-
-    429 is retried indefinitely (the page request re-enqueues itself).
-    Any other non-200 emits COMPETITIVE_UPDATE_FETCHED with the failing
-    status and `competitive_updates=None` — the partial work is
-    discarded. Two statuses are NEVER reported to the backend (they are
-    silently discarded inside the assembler) because they don't tell us
-    anything about whether the item exists:
-
-      - 400 BAD_CLAIMS (entitlement issue, even after auto-refresh)
-      - persistent 429 (rate-limit handler exhausted before success)
-
-    Successful assemblies emit one COMPETITIVE_UPDATE_FETCHED with the
-    merged ValorantCompetitiveUpdatesResponse as a dict.
-
-    The returned future resolves to the emitted event, or to None when
-    the assembly was discarded (so the caller can also "forget" it).
+    Stops on < 20 entries or 400 BAD_PARAMETER. 429 re-enqueues; 400 BAD_CLAIMS and
+    persistent 429 are silently discarded. Success emits COMPETITIVE_UPDATE_FETCHED with
+    the merged response; failure emits with competitive_updates=None. Future resolves to
+    the event, or None if discarded.
     """
 
     def __init__(
         self,
-        session: Any,  # RiotSession (typed Any to avoid import cycle)
+        session: Any,  # RiotSession (typed Any to avoid import cycle)  # pyright: ignore[reportExplicitAny, reportAny]
         scheduler: RequestScheduler,
         bus: EventBus,
         *,
         page_size: int = COMPETITIVE_UPDATES_PAGE_SIZE,
     ) -> None:
-        self._session: Any = session
+        self._session: Any = session  # pyright: ignore[reportExplicitAny]
         self._scheduler: RequestScheduler = scheduler
         self._bus: EventBus = bus
         self._page_size: int = page_size
-        # Serialize concurrent assemble() calls so only one player's
-        # pagination is in flight at a time. Without this, every player
-        # discovered through the chain would queue up a probe page, and
-        # the queue would fill with partial assemblies that each get one
-        # page processed per round before yielding.
+        # ensures that only one player is being handled at a time
         self._serial_lock: asyncio.Lock = asyncio.Lock()
 
     async def assemble(
@@ -323,7 +287,7 @@ class CompetitiveUpdateAssembler:
         """Walk pages 20-by-20 until the end. Returns the emitted event,
         or None when the assembly was discarded.
 
-        Concurrent calls serialize via an internal lock — assembly N+1
+        Concurrent calls serialize via an internal lock and assembly N+1
         only starts once N has finalized.
         """
         async with self._serial_lock:
@@ -353,14 +317,14 @@ class CompetitiveUpdateAssembler:
         start: int,
         end: int,
     ) -> None:
-        # Session may have been torn down while the page was queued —
-        # discard the assembly silently rather than raising.
+        # Session may have been torn down while the page was queued 
+        # discard the assembly silently rather than raising
         if self._session.client.is_closed:  # pyright: ignore[reportAny]
             await self._discard(asm)
             return
         try:
-            payload, status, error_code = (
-                await self._session.general_get_competitive_updates_raw(
+            payload, status, error_code = (  # pyright: ignore[reportAny]
+                await self._session.general_get_competitive_updates_raw(  # pyright: ignore[reportAny]
                     asm.puuid, start_index=start, end_index=end, shard=asm.shard,
                 )
             )
@@ -371,7 +335,7 @@ class CompetitiveUpdateAssembler:
             await self._fail(asm, riot_status=0)
             return
 
-        # 429 — keep trying, never fail.
+        # 429 keep trying, never fail.
         if status == 429:
             logger.info(
                 f"Comp-update page {asm.puuid[:8]} [{start},{end}) got 429; re-enqueueing"
@@ -380,7 +344,7 @@ class CompetitiveUpdateAssembler:
             self._enqueue_page(asm, start)
             return
 
-        # 400 BAD_PARAMETER => end of pagination; finalize with what we have.
+        # 400 BAD_PARAMETER => end of pagination
         if status == 400 and error_code == "BAD_PARAMETER":
             logger.debug(
                 f"Comp-update {asm.puuid[:8]}: BAD_PARAMETER at [{start},{end}); finalizing"
@@ -388,7 +352,7 @@ class CompetitiveUpdateAssembler:
             await self._succeed(asm)
             return
 
-        # 400 BAD_CLAIMS => discard silently, do NOT report to backend.
+        # 400 BAD_CLAIMS => discard silently, do NOT report to backend
         if status == 400 and error_code == "BAD_CLAIMS":
             logger.warning(
                 f"Comp-update {asm.puuid[:8]}: BAD_CLAIMS at [{start},{end}); discarding"
@@ -398,15 +362,15 @@ class CompetitiveUpdateAssembler:
 
         if status != 200 or payload is None:
             logger.warning(
-                f"Comp-update {asm.puuid[:8]} failed at [{start},{end}) "
+                f"Comp-update {asm.puuid[:8]} failed at [{start},{end}) "  # pyright: ignore[reportImplicitStringConcatenation]
                 f"with status {status} errorCode={error_code!r}; discarding partial work"
             )
             await self._fail(asm, riot_status=status)
             return
 
         try:
-            page = ValorantCompetitiveUpdatesResponse.from_dict(payload)
-        except Exception:  # noqa: BLE001
+            page = ValorantCompetitiveUpdatesResponse.from_dict(payload)  # pyright: ignore[reportAny]
+        except Exception: 
             logger.exception(
                 f"Comp-update {asm.puuid[:8]}: failed to parse page [{start},{end})"
             )
@@ -419,16 +383,16 @@ class CompetitiveUpdateAssembler:
             asm.version = page.Version
         asm.matches.extend(page.Matches)
 
-        # Short page => last page reached.
+        # Short page => last page reached
         if len(page.Matches) < self._page_size:
             logger.debug(
-                f"Comp-update {asm.puuid[:8]}: short page ({len(page.Matches)} < "
+                f"Comp-update {asm.puuid[:8]}: short page ({len(page.Matches)} < "  # pyright: ignore[reportImplicitStringConcatenation]
                 f"{self._page_size}) at [{start},{end}); finalizing"
             )
             await self._succeed(asm)
             return
 
-        # Full page: keep walking.
+        # Full page: keep walking
         asm.next_start = end
         self._enqueue_page(asm, asm.next_start)
 
@@ -444,7 +408,7 @@ class CompetitiveUpdateAssembler:
         # the payload reaches the backend.
         payload_dict: dict[str, Any] = asdict(merged)  # pyright: ignore[reportExplicitAny]
         logger.info(
-            f"Comp-update assembly complete for {asm.puuid[:8]} on {asm.shard}: "
+            f"Comp-update assembly complete for {asm.puuid[:8]} on {asm.shard}: "  # pyright: ignore[reportImplicitStringConcatenation]
             f"{len(asm.matches)} match(es)"
         )
         event = CompetitiveUpdateEvent(
@@ -454,12 +418,12 @@ class CompetitiveUpdateAssembler:
             competitive_updates=payload_dict,
             fetch_time_ms=int(time.time() * 1000),
         )
-        await self._bus.emit(Event.COMPETITIVE_UPDATE_FETCHED, event)
+        _ = await self._bus.emit(Event.COMPETITIVE_UPDATE_FETCHED, event)
         asm.future.set_result(event)
 
     async def _fail(self, asm: _CompetitiveUpdateAssembly, *, riot_status: int) -> None:
         """Emit the failure to the backend so the work item can be confirmed
-        non-existent / broken by multiple nodes. Partial matches are discarded.
+        non-existent / broken by multiple nodes. Partial matches are discarded
         """
         if asm.future.done():
             return
@@ -470,7 +434,7 @@ class CompetitiveUpdateAssembler:
             competitive_updates=None,
             fetch_time_ms=int(time.time() * 1000),
         )
-        await self._bus.emit(Event.COMPETITIVE_UPDATE_FETCHED, event)
+        _ = await self._bus.emit(Event.COMPETITIVE_UPDATE_FETCHED, event)
         asm.future.set_result(event)
 
     async def _discard(self, asm: _CompetitiveUpdateAssembly) -> None:

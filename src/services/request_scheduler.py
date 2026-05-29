@@ -1,32 +1,12 @@
-"""
-Endpoint-aware request scheduler for Riot API requests.
+"""endpoint-aware request scheduler with 4 parallel workers.
 
-Three independent workers run in parallel, each draining its own queue(s):
+- unlimited worker: drains state then userinfo; no pacing, not affected by pause/resume
+- match-details worker: paced (default 1700ms), 3 priority tiers (self > task > dig), pausable
+- match-history worker: same shape, separate pacer
+- competitive-updates worker: same shape, separate pacer (default 2050ms)
 
-- **Unlimited worker**: drains the state queue first, then the userinfo
-  queue. No pacing; the underlying endpoints (presence, owned, loadout,
-  XP, penalties, store, task list, task ack, etc.) have no Riot
-  rate-limit. The state queue is purged on game-state transitions; the
-  userinfo queue persists across them. NOT affected by pause/resume —
-  the rationale for pausing is to yield rate-limit budget to other apps,
-  and these endpoints don't consume any.
-
-- **match-details worker**: paces calls at a minimum interval (default
-  1700ms) measured between successive requests. Three sub-priority
-  queues: ``self`` (own freshly-completed match) > ``task`` (server-
-  issued task) > ``dig`` (background sweep). Strict priority, FIFO
-  within a tier. Pausable.
-
-- **match-history worker**: same shape as match-details, separate
-  pacer and separate sub-queues. Pausable.
-
-- **competitive-updates worker**: same shape, separate pacer
-  (default 2050ms) and separate sub-queues. Pausable.
-
-Pause/resume affects only the three paced workers. Stop tears down all
-four. Game-state transitions purge the state queue (and cancel the
-in-flight state request) but leave the paced queues intact, so a
-freshly-finished match still submits after the transition.
+pause/resume affects only paced workers; on_state_change() purges the state queue without
+touching paced queues so in-progress match submissions survive game-state transitions.
 """
 
 from __future__ import annotations
@@ -46,12 +26,7 @@ Priority = Literal["self", "task", "dig"]
 
 
 class IntervalPacer:
-    """Minimum-interval pacer for a single endpoint.
-
-    Records the monotonic timestamp of the last release and forces the
-    next caller to wait until ``min_interval_seconds`` has elapsed since
-    that timestamp.
-    """
+    """minimum-interval pacer; blocks the next caller until min_interval_seconds has elapsed since the last release"""
 
     def __init__(self, min_interval_seconds: float, label: str = "") -> None:
         self._min_interval: float = min_interval_seconds
@@ -70,26 +45,14 @@ class IntervalPacer:
 
 @dataclass(slots=True)
 class QueuedRequest:
-    """A request waiting to be executed by the scheduler."""
+    """a request waiting to be executed by the scheduler"""
 
     execute: Callable[[], Awaitable[Any]]  # pyright: ignore[reportExplicitAny]
     label: str = ""
 
 
 class RequestScheduler:
-    """Four-worker priority scheduler for API requests.
-
-    See module docstring for the queue/worker layout. Public surface:
-
-    - ``enqueue_state(execute, label)``: unlimited, purged on state change
-    - ``enqueue_userinfo(execute, label)``: unlimited, persistent
-    - ``enqueue_match_details(execute, priority, label)``: paced
-    - ``enqueue_match_history(execute, priority, label)``: paced
-    - ``enqueue_competitive_updates(execute, priority, label)``: paced
-    - ``pause()`` / ``resume()``: affects paced workers only
-    - ``on_state_change()``: purges state queue, cancels in-flight state req
-    - ``start()`` / ``stop()``: lifecycle
-    """
+    """four-worker priority scheduler for Riot API requests; see module docstring for the worker/queue layout"""
 
     def __init__(
         self,
@@ -121,24 +84,23 @@ class RequestScheduler:
         self._mh_pacer: IntervalPacer = IntervalPacer(match_history_interval_s, "match-history")
         self._cu_pacer: IntervalPacer = IntervalPacer(competitive_updates_interval_s, "competitive-updates")
 
-        # Per-worker wake-up signals
+        # per-worker wake-up signals
         self._unlimited_notify: asyncio.Event = asyncio.Event()
         self._md_notify: asyncio.Event = asyncio.Event()
         self._mh_notify: asyncio.Event = asyncio.Event()
         self._cu_notify: asyncio.Event = asyncio.Event()
 
-        # Fires whenever a `task`-priority paced request is dequeued, so the
-        # submission service can refill server tasks promptly.
+        # fires when a task-priority request is dequeued; signals SubmissionService to refill
         self._task_consumed: asyncio.Event = asyncio.Event()
 
-        # Paced-worker pause gate (shared by md + mh; unlimited ignores it)
+        # paced-worker pause gate (shared by md + mh; unlimited ignores it)
         self._paced_active: asyncio.Event = asyncio.Event()
         self._paced_active.set()
 
         self._running: bool = False
         self._workers: list[asyncio.Task[None]] = []
 
-        # In-flight tracking for state-request cancellation on state change
+        # in-flight tracking for state-request cancellation on state change
         self._current_state_task: asyncio.Task[Any] | None = None  # pyright: ignore[reportExplicitAny]
 
     # ------------------- Public API -------------------
@@ -156,6 +118,11 @@ class RequestScheduler:
         return len(self._md_task_queue)
 
     @property
+    def match_details_dig_queue_size(self) -> int:
+        """depth of the dig-priority match-details backlog (for backpressure)"""
+        return len(self._md_dig_queue)
+
+    @property
     def match_history_task_queue_size(self) -> int:
         return len(self._mh_task_queue)
 
@@ -165,7 +132,7 @@ class RequestScheduler:
 
     @property
     def task_queue_size(self) -> int:
-        """Combined count of outstanding ``task``-priority paced requests."""
+        """combined count of outstanding task-priority paced requests"""
         return (
             len(self._md_task_queue)
             + len(self._mh_task_queue)
@@ -174,11 +141,11 @@ class RequestScheduler:
 
     @property
     def task_consumed_event(self) -> asyncio.Event:
-        """Set whenever a `task`-priority paced request is dequeued."""
+        """set whenever a task-priority paced request is dequeued"""
         return self._task_consumed
 
     def start(self) -> None:
-        """Start the four worker loops. No-op if already running."""
+        """start the four worker loops; no-op if already running"""
         if self._running:
             return
         self._running = True
@@ -192,14 +159,14 @@ class RequestScheduler:
         logger.info("Request scheduler started (4 workers)")
 
     def stop(self) -> None:
-        """Stop all workers and purge every queue."""
+        """stop all workers and purge every queue"""
         self._running = False
-        # Wake every worker so they re-check _running and exit
+        # wake every worker so they re-check _running and exit
         self._unlimited_notify.set()
         self._md_notify.set()
         self._mh_notify.set()
         self._cu_notify.set()
-        self._paced_active.set()  # unblock any pause waits so the worker can exit
+        self._paced_active.set()  # unblock pause waits so workers can exit
         for w in self._workers:
             if not w.done():
                 _ = w.cancel()
@@ -219,13 +186,13 @@ class RequestScheduler:
         logger.info("Request scheduler stopped")
 
     def pause(self) -> None:
-        """Pause the paced workers. Unlimited worker keeps draining."""
+        """pause the paced workers; unlimited worker keeps draining"""
         if self._paced_active.is_set():
             logger.debug("Paced workers paused")
         self._paced_active.clear()
 
     def resume(self) -> None:
-        """Resume the paced workers."""
+        """resume the paced workers"""
         if not self._paced_active.is_set():
             logger.debug("Paced workers resumed")
         self._paced_active.set()
@@ -234,12 +201,7 @@ class RequestScheduler:
         self._cu_notify.set()
 
     def on_state_change(self) -> None:
-        """Handle a game-state transition.
-
-        Purges all state-bound requests and cancels the in-flight state
-        request (if any). Userinfo and paced queues are untouched, so a
-        freshly-completed match still submits after the transition.
-        """
+        """purge state queue and cancel in-flight state request; paced queues are untouched"""
         self._purge_state_queue()
         self._cancel_current_state()
 
@@ -341,10 +303,10 @@ class RequestScheduler:
         return None, -1
 
     async def _unlimited_worker(self) -> None:
-        """Drains state then userinfo. No pacing, no pause gate."""
+        """drain state then userinfo; no pacing, no pause gate"""
         logger.debug("Unlimited worker started")
         while self._running:
-            # State takes precedence over userinfo
+            # state takes precedence over userinfo
             item: QueuedRequest | None
             from_state: bool = False
             if self._state_queue:
@@ -386,7 +348,7 @@ class RequestScheduler:
     ) -> None:
         logger.debug(f"{name} worker started")
         while self._running:
-            # Honor pause
+            # honor pause
             if not self._paced_active.is_set():
                 _ = await self._paced_active.wait()
                 continue
@@ -397,21 +359,15 @@ class RequestScheduler:
                 _ = await notify.wait()
                 continue
 
-            # Tier 1 is always the `task` queue (self=0, task=1, dig=2). Signal
-            # any subscriber (e.g. SubmissionService) that the task queue just
-            # shrank so they can decide whether to refill from the backend.
+            # tier 1 is the task queue (self=0, task=1, dig=2); signal subscribers that it shrank
             if tier_index == 1:
                 self._task_consumed.set()
 
             try:
                 await pacer.acquire()
-                # Re-check pause after acquire (it may have flipped while sleeping)
+                # re-check pause after acquire (may have flipped while sleeping)
                 if not self._paced_active.is_set():
-                    # Put item back at the front of its priority tier -> simplest
-                    # is to re-enqueue at the head of the highest-priority queue
-                    # it would belong to. Since we lost the original tier, just
-                    # push to "self" so it runs ASAP on resume. Conservatively
-                    # safe because pause-during-acquire is rare.
+                    # push to "self" so it runs ASAP on resume (pause-during-acquire is rare; original tier is lost)
                     queues_in_priority_order()[0].appendleft(item)
                     continue
                 logger.debug(f"Executing {name} request: {item.label}")

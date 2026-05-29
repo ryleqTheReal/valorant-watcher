@@ -52,10 +52,10 @@ logging.getLogger().addHandler(_err_handler)
 logger: logging.Logger = logging.getLogger("main")
 
 
-def _excepthook(exc_type, exc, tb) -> None:
+def _excepthook(exc_type, exc, tb) -> None:  # pyright: ignore[reportUnknownParameterType, reportMissingParameterType]
     logger.critical(
         "UNCAUGHT EXCEPTION\n%s",
-        "".join(traceback.format_exception(exc_type, exc, tb)),
+        "".join(traceback.format_exception(exc_type, exc, tb)),  # pyright: ignore[reportUnknownArgumentType]
     )
 
 

@@ -1,9 +1,4 @@
-"""
-Collects Mac hardware specs and computes a stable HWID hash.
-
-Uses a single `system_profiler -json` call to gather all data.
-Handles both Apple Silicon and Intel Macs.
-"""
+"""collects Mac hardware specs via a single system_profiler -json call; handles Apple Silicon and Intel"""
 
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("hardware_mac")
 
 
-# ── Component dataclasses ────────────────────────────────────────
+# ---- component dataclasses ---
 
 @dataclass
 class MacMachineInfo:
@@ -84,7 +79,7 @@ class MacInputDevice:
     connection: str = ""          # USB | Bluetooth | Built-in
 
 
-# ── Top-level snapshot ───────────────────────────────────────────
+# ---- Top-level snapshot --------------------------------------------------------------------------------------
 
 @dataclass
 class MacHardwareSnapshot:
@@ -165,7 +160,7 @@ class MacHardwareSnapshot:
         }
 
 
-# ── system_profiler query (single call, all data types) ─────────
+# ---- system_profiler query (single call, all data types) ------------------
 
 _SP_DATA_TYPES = [
     "SPHardwareDataType",
@@ -198,7 +193,7 @@ async def _run_system_profiler() -> dict[str, object]:
         return {}
 
 
-# ── Parsing helpers ──────────────────────────────────────────────
+# ---- Parsing helpers --------------------------------------------------------------------------------------------
 
 def _str(val: object) -> str:
     return str(val).strip() if val is not None else ""
@@ -479,7 +474,7 @@ def _parse_device_type(machine_name: str) -> str:
     return "Unknown"
 
 
-# ── HWID hashing ─────────────────────────────────────────────────
+# ---- HWID hashing --------------------------------------------------------------------------------------------------
 
 def _compute_hwid(hw: dict[str, object]) -> str:
     """
@@ -499,7 +494,7 @@ def _compute_hwid(hw: dict[str, object]) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
-# ── Public API ───────────────────────────────────────────────────
+# ---- Public API ------------------------------------------------------------------------------------------------------
 
 async def collect_hardware_mac() -> MacHardwareSnapshot:
     """Collect all Mac hardware specs. Call once at startup."""

@@ -1,16 +1,5 @@
-"""Singleton configuration manager.
+"""singleton configuration manager; first call to ConfigManager() loads config.json, cfg.reload() re-reads from disk"""
 
-Usage::
-
-    from src.services.config_manager import ConfigManager
-
-    cfg = ConfigManager()        # first call loads config.json
-    print(cfg.config.server_base_url)
-
-    cfg.reload()                 # re-read from disk at runtime
-"""
-
-# Only for type annotation fix
 from __future__ import annotations
 
 import json
@@ -22,9 +11,9 @@ from utils.models import AppConfig
 from utils.file_utils import get_config_path
 
 
-@final # Makes sure that this class cannot be used as subclass, makes my analyzer not complain
+@final
 class ConfigManager:
-    """Thread-safe, lazy-loading singleton that exposes an ``AppConfig``."""
+    """thread-safe, lazy-loading singleton that exposes an AppConfig"""
 
     _instance: ConfigManager | None = None
     _lock = Lock()
@@ -42,14 +31,14 @@ class ConfigManager:
 
     @property
     def config(self) -> AppConfig:
-        """Return the current ``AppConfig``, loading on first access."""
+        """current AppConfig; loads from disk on first access"""
 
         if self._config is None:
             return self._load()
         return self._config
 
     def reload(self) -> AppConfig:
-        """Re-read config.json from disk and return the updated config."""
+        """re-read config.json from disk"""
         return self._load()
 
 
@@ -65,6 +54,6 @@ class ConfigManager:
 
     @classmethod
     def _reset(cls) -> None:  # pyright: ignore[reportUnusedFunction]
-        """Destroy the singleton (for testing only)."""
+        """destroy the singleton (testing only)"""
         with cls._lock:
             cls._instance = None

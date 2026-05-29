@@ -1,45 +1,13 @@
-"""
-Two-phase match data collection plan:
+"""two-phase match collection pipeline.
 
-Phase 1 (Fresh):  on every app launch, assemble the player's *entire*
-                  current match history via HistoryAssembler (emits
-                  MATCH_HISTORY_FETCHED once for the full payload),
-                  then fan out match-details for every match not yet
-                  in the central dedupe set. Each detail emits
-                  MATCH_DETAIL_FETCHED and harvests players into the
-                  unvisited pool (for dig) and into the competitive-
-                  updates pipeline
+Phase 1 (Fresh): on each launch, assemble the player's full history, fan out details
+for every unseen match, and harvest players for dig + competitive updates.
 
-Phase 2 (Dig):    once every locally-known match is collected we explore
-                  other-player matches via randomized DFS on the
-                  match-player graph. Each visited player triggers a
-                  FULL history assembly (also emitted via
-                  MATCH_HISTORY_FETCHED), then matches are walked.
+Phase 2 (Dig): randomized DFS over the match-player graph; each visited player triggers
+a full history assembly. 15% teleport chance restarts from a new random unvisited player.
 
-All collector requests are enqueued at priority "dig" so server-issued
-tasks always win the scheduler. The collector is a gap filler.
-
-State is split into two scopes:
-
-- Per-account watermark: not currently needed. fresh re-pulls the
-  entire history every launch so the backend always sees the latest
-  state. (Old fields like newest_known_time/oldest_fetched_time were
-  removed; their JSON keys, if present in older watermark files, are
-  ignored on load.)
-- Central: fetched_matches (detail dedupe) and dig_visited/
-  dig_visited_matches (DFS state), shared across all accounts so a
-  detail is never fetched twice.
-
-The dig phase uses a randomized DFS inspired by google's random surfer:
-
-    - Visited matches and players are tracked. Hitting a visited
-      node is a dead end that triggers a restart from a new random root
-    - Players are selected randomly from each match (no fixed index)
-    - A 15% teleportation chance at each step abandons the current walk
-      and restarts from a new random unvisited player to cover as many
-      graphs as possible
-
-Pretty cool thing if you ask me :P
+All collector requests run at "dig" priority so server tasks always pre-empt them.
+Central dedup sets (fetched_matches, dig_visited, dig_visited_matches) persist across sessions.
 """
 
 from __future__ import annotations
@@ -71,25 +39,27 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 DIG_RESTART_CHANCE: float = 0.15
 MAX_UNVISITED_PLAYERS: int = 5000
-_COLLECTOR_PRIORITY = "dig"  # All collector requests yield to "task"
+_COLLECTOR_PRIORITY = "dig"  # all collector requests yield to "task"
 
-# Riot expires match details 90 days after start. Drop with a 1 hour buffer
-# so we never enqueue a fetch that would race the expiry.
+# Riot expires match details 90 days after start; drop with a 1h buffer
+# so we never enqueue a fetch that races the expiry
 _MATCH_MAX_AGE_MS: int = (90 * 24 - 1) * 60 * 60 * 1000
 
-_FETCHED_MATCHES_CAP: int = 100
-_DIG_VISITED_CAP: int = 500
-_DIG_VISITED_MATCHES_CAP: int = 200
-_COMP_UPDATE_SEEN_CAP: int = 500
+# dedup windows; large enough to remember in-flight matches/players;
+# a tiny window defeats dedup and drives dig-queue growth
+_FETCHED_MATCHES_CAP: int = 20_000
+_DIG_VISITED_CAP: int = 20_000
+_DIG_VISITED_MATCHES_CAP: int = 20_000
+_COMP_UPDATE_SEEN_CAP: int = 10_000
 _COMP_UPDATE_QUEUE_MAX: int = 25
+
+# ceiling on the dig match-detail backlog; the chain stops enqueueing past it
+# "task"/"self" work and the dig-walk driver are exempt
+_DIG_DETAIL_QUEUE_MAX: int = 200
 
 
 def _cap_set(s: set[str], limit: int) -> None:
-    """Prune a set to half its limit when it exceeds the limit.
-
-    Evicts arbitrary entries. The dedup sets only guard against redundant
-    API calls, so re-fetching an evicted entry is harmless.
-    """
+    """prune a set to half its limit when exceeded; re-fetching evicted entries is harmless (dedup only)"""
     if len(s) <= limit:
         return
     target = limit // 2
@@ -104,27 +74,14 @@ def _cap_set(s: set[str], limit: int) -> None:
 
 
 def _is_expired(start_time_ms: int | None) -> bool:
-    """True if the match start time is known and older than 89d 23h."""
+    """true if the match start time is known and older than 89d 23h"""
     if not start_time_ms or start_time_ms <= 0:
         return False
     return (int(time.time() * 1000) - start_time_ms) >= _MATCH_MAX_AGE_MS
 
 
 class MatchCollector:
-    """Progressively collects match history and details across app sessions.
-
-    Two-phase pipeline:
-
-    - **Fresh** runs once per launch: assemble the player's full history,
-      fetch details for every match not in the central dedupe set, and
-      harvest players for dig + competitive updates.
-    - **Dig** runs forever after that: randomized DFS over the
-      match-player graph, assembling each visited player's full history
-      and walking matches.
-
-    Every paced request enqueued by the collector uses priority "dig"
-    so server tasks always pre-empt collector work.
-    """
+    """progressively collects match history and details across sessions; see module docstring for pipeline details"""
 
     def __init__(
         self,
@@ -154,7 +111,7 @@ class MatchCollector:
         self._unvisited_players: set[str] = set()
         self._dig_detail_queue: deque[tuple[str, int | None]] = deque()
 
-        # In-session dedup for competitive-update assemblies (per-puuid).
+        # in-session dedup for competitive-update assemblies (per-puuid)
         self._comp_update_seen: set[str] = set()
         self._comp_update_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_COMP_UPDATE_QUEUE_MAX)
         self._comp_update_worker: asyncio.Task[None] | None = None
@@ -163,20 +120,8 @@ class MatchCollector:
         self._register_chain_subscribers()
 
     def _register_chain_subscribers(self) -> None:
-        """Wire up the cross-collector chain.
-
-        Every fetched history/comp-update/detail event (regardless of
-        source — server task, fresh, dig, or chain) is fanned out into
-        the other two queues so all three rate-limited workers stay
-        saturated:
-
-          - history(puuid) -> comp-update(puuid) + details(History[].MatchID)
-          - comp-update(puuid) -> details(Matches[].MatchID)
-          - details(match) -> harvest players + comp-update per player
-
-        Dedup against fetched_matches / _comp_update_seen prevents the
-        chain from looping or duplicating work.
-        """
+        """subscribe to all three fetch events to fan out the collection chain:
+        history -> comp-update + details; comp-update -> details; details -> harvest + comp-update per player"""
         _ = self._bus.on(Event.MATCH_HISTORY_FETCHED, self._on_history_event, priority=5)
         _ = self._bus.on(
             Event.COMPETITIVE_UPDATE_FETCHED, self._on_competitive_update_event, priority=5,
@@ -188,11 +133,14 @@ class MatchCollector:
     async def _on_history_event(self, ev: MatchHistoryEvent) -> None:
         if not self._running or ev.riot_status != 200 or not ev.match_history:
             return
-        # Same puuid -> comp-update assembly.
+        # same puuid -> comp-update assembly
         self._enqueue_competitive_update(ev.puuid)
-        # History entries -> match-detail fetches.
-        entries: list[Any] = ev.match_history.get("History") or []  # pyright: ignore[reportAny]
-        for entry in entries:
+        # history entries -> match-detail fetches
+        entries: list[Any] = ev.match_history.get("History") or []  # pyright: ignore[reportExplicitAny]
+        for entry in entries:  # pyright: ignore[reportAny]
+            # stop fanning out once the dig backlog is saturated
+            if self._scheduler.match_details_dig_queue_size >= _DIG_DETAIL_QUEUE_MAX:
+                break
             if not isinstance(entry, dict):
                 continue
             mid = entry.get("MatchID")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -207,8 +155,11 @@ class MatchCollector:
     async def _on_competitive_update_event(self, ev: CompetitiveUpdateEvent) -> None:
         if not self._running or ev.riot_status != 200 or not ev.competitive_updates:
             return
-        matches: list[Any] = ev.competitive_updates.get("Matches") or []  # pyright: ignore[reportAny]
-        for entry in matches:
+        matches: list[Any] = ev.competitive_updates.get("Matches") or []  # pyright: ignore[ reportExplicitAny]
+        for entry in matches:  # pyright: ignore[reportAny]
+            # stop fanning out once the dig backlog is saturated
+            if self._scheduler.match_details_dig_queue_size >= _DIG_DETAIL_QUEUE_MAX:
+                break
             if not isinstance(entry, dict):
                 continue
             mid = entry.get("MatchID")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -230,7 +181,7 @@ class MatchCollector:
     def _enqueue_chain_detail(
         self, match_id: str, shard: str, game_start_millis: int | None = None,
     ) -> None:
-        """Enqueue a match-detail fetch on a foreign shard at dig priority."""
+        """enqueue a match-detail fetch on a foreign shard at dig priority"""
         self._scheduler.enqueue_match_details(
             lambda mid=match_id, sh=shard, gs=game_start_millis: self._fetch_chain_detail(mid, sh, gs),
             _COLLECTOR_PRIORITY,
@@ -246,7 +197,7 @@ class MatchCollector:
             payload, status = await self._session.general_get_details_raw(
                 match_id, shard=shard,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(f"Chain: detail {match_id[:8]} raised")
             _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
                 shard=shard, match_id=match_id, riot_status=0, match_details=None,
@@ -276,7 +227,7 @@ class MatchCollector:
     # --------- Public Interface ---------
 
     def start(self) -> None:
-        """Begin match collection."""
+        """begin match collection"""
         if self._running:
             return
         self._running = True
@@ -292,7 +243,7 @@ class MatchCollector:
         self._fresh_task = asyncio.create_task(self._run_fresh())
 
     def stop(self) -> None:
-        """Stop collection and persist progress."""
+        """stop collection and persist progress"""
         if not self._running:
             return
         self._running = False
@@ -307,7 +258,7 @@ class MatchCollector:
     # --------- Phase 1: Fresh ---------
 
     async def _run_fresh(self) -> None:
-        """Assemble the entire history for this account and fan out details."""
+        """assemble the entire history for this account and fan out details"""
         if not self._running:
             return
 
@@ -315,7 +266,7 @@ class MatchCollector:
             event = await self._assembler.assemble(
                 self.puuid, self._shard, priority=_COLLECTOR_PRIORITY,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Fresh: assembler raised; transitioning to dig")
             self._transition_to_dig()
             return
@@ -381,7 +332,7 @@ class MatchCollector:
     async def _fetch_self_detail(
         self, match_id: str, game_start_millis: int | None = None,
     ) -> None:
-        """Fetch a fresh-phase match detail, emit event, harvest players."""
+        """fetch a fresh-phase match detail, emit event, harvest players"""
         if not self._running:
             return
 
@@ -389,7 +340,7 @@ class MatchCollector:
             payload, status = await self._session.general_get_details_raw(
                 match_id, shard=self._shard,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(f"Fresh: detail {match_id[:8]} raised")
             _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
                 shard=self._shard, match_id=match_id, riot_status=0, match_details=None,
@@ -397,8 +348,7 @@ class MatchCollector:
             ))
             return
 
-        # Harvest + comp-update fanout happen via the MATCH_DETAIL_FETCHED
-        # bus subscriber (so server-task details also fan out).
+        # harvest + comp-update fanout happen via the MATCH_DETAIL_FETCHED bus subscriber
         _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
             shard=self._shard, match_id=match_id, riot_status=status, match_details=payload,
             game_start_millis=game_start_millis,
@@ -417,7 +367,7 @@ class MatchCollector:
         self._dig_walk_start()
 
     def _dig_walk_start(self) -> None:
-        """Pick a random unvisited player and begin a new DFS walk."""
+        """pick a random unvisited player and begin a new DFS walk"""
         if not self._running:
             return
 
@@ -440,7 +390,7 @@ class MatchCollector:
         _ = asyncio.create_task(self._run_dig_history(target))
 
     async def _run_dig_history(self, target_puuid: str) -> None:
-        """Assemble a player's full history, then walk their unvisited matches."""
+        """assemble a player's full history, then walk their unvisited matches"""
         if not self._running:
             return
 
@@ -448,7 +398,7 @@ class MatchCollector:
             event = await self._assembler.assemble(
                 target_puuid, self._shard, priority=_COLLECTOR_PRIORITY,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(f"Dig: assembler raised for {target_puuid[:8]}")
             self._dig_walk_start()
             return
@@ -461,11 +411,11 @@ class MatchCollector:
             self._dig_walk_start()
             return
 
-        history_entries: list[dict[str, Any]] = event.match_history.get("History") or []  # pyright: ignore[reportAny]
+        history_entries: list[dict[str, Any]] = event.match_history.get("History") or []  # pyright: ignore[reportExplicitAny]
         unvisited: list[tuple[str, int | None]] = []
         for entry in history_entries:
-            mid = entry.get("MatchID")  # pyright: ignore[reportAny]
-            start = entry.get("GameStartTime")  # pyright: ignore[reportAny]
+            mid = entry.get("MatchID")  
+            start = entry.get("GameStartTime")
             start_ms = start if isinstance(start, int) else None
             if _is_expired(start_ms):
                 continue
@@ -504,7 +454,7 @@ class MatchCollector:
     async def _fetch_dig_detail(
         self, match_id: str, game_start_millis: int | None = None,
     ) -> None:
-        """Fetch a dig-phase match detail, harvest players, then drain or walk."""
+        """fetch a dig-phase match detail, harvest players, then drain or walk"""
         if not self._running:
             return
 
@@ -514,11 +464,10 @@ class MatchCollector:
             payload, status = await self._session.general_get_details_raw(
                 match_id, shard=self._shard,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception(f"Dig: detail {match_id[:8]} raised")
 
-        # Harvest + comp-update fanout happen via the MATCH_DETAIL_FETCHED
-        # bus subscriber.
+        # harvest + comp-update fanout happen via the MATCH_DETAIL_FETCHED bus subscriber
         _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
             shard=self._shard, match_id=match_id, riot_status=status, match_details=payload,
             game_start_millis=game_start_millis,
@@ -566,7 +515,7 @@ class MatchCollector:
     # --------- Player harvesting ---------
 
     def _harvest_players(self, match_response: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
-        """Add unvisited PUUIDs from a match-details payload to the dig pool."""
+        """add unvisited PUUIDs from a match-details payload to the dig pool"""
         if len(self._unvisited_players) >= MAX_UNVISITED_PLAYERS:
             return
 
@@ -580,7 +529,7 @@ class MatchCollector:
                 self._unvisited_players.add(puuid)
 
     def _fanout_comp_updates(self, match_response: dict[str, Any]) -> None:  # pyright: ignore[reportExplicitAny]
-        """Enqueue a competitive-update assembly per player in this match."""
+        """enqueue a competitive-update assembly per player in this match"""
         players: list[dict[str, Any]] = match_response.get("players", []) or []    # pyright: ignore[reportExplicitAny]
         for player in players:
             puuid = player.get("subject", "")  # pyright: ignore[reportAny]
@@ -588,16 +537,8 @@ class MatchCollector:
                 self._enqueue_competitive_update(puuid)
 
     def _enqueue_competitive_update(self, puuid: str) -> None:
-        """Queue a CompetitiveUpdateAssembler job at "dig" priority.
-
-        Deduped per-session: re-fetching the same player's comp updates
-        wastes 20+ paginated calls for unchanged data, and once we've
-        already reported a status to the backend for this puuid the
-        item is no longer claimable by us anyway.
-
-        Jobs are processed by a single worker task to avoid hundreds of
-        coroutines piling up waiting on the assembler's serial lock.
-        """
+        """enqueue a competitive update assembly at "dig" priority; deduped per-session to avoid 20+ redundant paginated
+        fetches; processed by a single worker to prevent coroutine pile-up on the assembler lock"""
         if puuid in self._comp_update_seen:
             return
         self._comp_update_seen.add(puuid)
@@ -608,7 +549,7 @@ class MatchCollector:
             pass
 
     async def _run_comp_update_worker(self) -> None:
-        """Single worker that drains the comp-update queue sequentially."""
+        """single worker that drains the comp-update queue sequentially"""
         while self._running:
             try:
                 puuid = await asyncio.wait_for(self._comp_update_queue.get(), timeout=2.0)
@@ -624,11 +565,11 @@ class MatchCollector:
                 )
             except asyncio.CancelledError:
                 return
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception(f"Comp-update worker: assembly for {puuid[:8]} raised")
 
     def _prune_sets(self) -> None:
-        """Cap all dedup sets to prevent unbounded memory growth."""
+        """cap all dedup sets to prevent unbounded memory growth"""
         _cap_set(self._watermark.fetched_matches, _FETCHED_MATCHES_CAP)
         _cap_set(self._watermark.dig_visited, _DIG_VISITED_CAP)
         _cap_set(self._watermark.dig_visited_matches, _DIG_VISITED_MATCHES_CAP)
@@ -637,7 +578,7 @@ class MatchCollector:
     # --------- Watermark Persistence ---------
 
     def _load_watermark(self) -> None:
-        """Load central collection state from disk. Unknown keys are ignored."""
+        """load central collection state from disk; unknown keys are ignored"""
         try:
             if not self._watermark_path.exists():
                 return
@@ -653,9 +594,7 @@ class MatchCollector:
             dig_unvisited: list[str] = raw.get("dig_queue", [])  # pyright: ignore[reportAny]
             self._unvisited_players = set(dig_unvisited) - self._watermark.dig_visited
 
-            # Per-account map: kept for forward-compat even though
-            # AccountProgress is currently empty. Any unknown keys in older
-            # files are simply ignored.
+            # per-account map kept for forward-compat; AccountProgress is empty, unknown keys ignored
             accounts_raw: dict[str, Any] = raw.get("accounts", {})  # pyright: ignore[reportExplicitAny, reportAny]
             for puuid_key, _acct_data in accounts_raw.items():  # pyright: ignore[reportAny]
                 self._watermark.accounts[puuid_key] = AccountProgress()
@@ -691,29 +630,21 @@ class MatchCollector:
     # --------- Leaderboard fallback ---------
 
     async def _fallback_leaderboard(self) -> list[str]:
-        """Seed the dig phase from top-500 leaderboard players when the account
-        has no match history.
-
-        Picks a random player from the leaderboard, fetches their match history,
-        and returns the match IDs. If that player has no history, tries the next
-        random player until one works or all 500 are exhausted.
-
-        Raises:
-            LeaderboardFallbackError: If no leaderboard player yields any history.
-        """
+        """seed dig from top-500 leaderboard when account has no history; tries random players until one has matches;
+        raises LeaderboardFallbackError if all 500 are exhausted"""
         leaderboard: LeaderboardResponse = await self._session.general_get_leaderboard(
             start_index=0, size=510,
         )
         _ = await self._bus.emit(Event.LEADERBOARD_FETCHED, leaderboard)
         players = [
-            p for p in (leaderboard.Players or [])  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
-            if hasattr(p, "puuid") and p.puuid
+            p for p in (leaderboard.Players or []) 
+            if hasattr(p, "puuid") and p.puuid  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
         ]
 
         if not players:
             raise LeaderboardFallbackError(message="Leaderboard returned no players")
 
-        # Seed the unvisited pool with all leaderboard players
+        # seed the unvisited pool with all leaderboard players
         for p in players:
             p_puuid: str = p.puuid  # pyright: ignore[reportUnknownMemberType, reportAssignmentType, reportUnknownVariableType, reportAttributeAccessIssue]
             if (p_puuid and p_puuid != self.puuid
@@ -733,23 +664,23 @@ class MatchCollector:
                 event = await self._assembler.assemble(
                     puuid, self._shard, priority=_COLLECTOR_PRIORITY,
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 logger.debug(f"Fallback: assembly raised for {puuid[:8]}: {e}")
                 continue
 
             if event.riot_status != 200 or not event.match_history:
                 continue
 
-            history_entries: list[dict[str, Any]] = event.match_history.get("History") or []  # pyright: ignore[reportAny]
+            history_entries: list[dict[str, Any]] = event.match_history.get("History") or []  # pyright: ignore[reportExplicitAny]
             match_ids: list[str] = []
             for entry in history_entries:
-                mid = entry.get("MatchID")  # pyright: ignore[reportAny]
+                mid = entry.get("MatchID") 
                 if isinstance(mid, str):
                     match_ids.append(mid)
 
             if match_ids:
                 logger.info(
-                    f"Fallback: found {len(match_ids)} match(es) from leaderboard player "
+                    f"Fallback: found {len(match_ids)} match(es) from leaderboard player "  # pyright: ignore[reportImplicitStringConcatenation]
                     f"{puuid[:8]}"
                 )
                 return match_ids

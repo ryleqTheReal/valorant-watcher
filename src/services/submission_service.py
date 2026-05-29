@@ -1,29 +1,8 @@
-"""
-Submission service: bridges local Riot data collection with the backend API.
+"""submission service: bridges Riot data collection with the backend API.
 
-Responsibilities
-================
-
-- **Server tasks first.** Polls `GET /v1/tasks` whenever a game token is
-  available and the scheduler's task queue is low. Each task is dispatched
-  as a `task`-priority scheduler request so it pre-empts DFS work but
-  still yields to in-game state requests.
-- **Match-details tasks** are single Riot fetches. The result (including
-  non-200 status) is emitted as MATCH_DETAIL_FETCHED and buffered for
-  POST /v1/matches.
-- **Match-history tasks** require a *complete* history. We probe page 0
-  for `Total`, enqueue every remaining page, then merge them into a
-  single payload (concat `History`, max `EndIndex`, max `Total`) before
-  emitting MATCH_HISTORY_FETCHED. If any page fails (status != 200) the
-  assembly aborts and reports the failure status with `match_history`
-  set to None. 429s do NOT count as failure: the page task is
-  re-enqueued and the assembly stays open until it eventually resolves.
-- **Batched submission** of all collected matches/histories. Buffers
-  flush every 30 s or when the API max (100 matches / 50 histories) is
-  hit; SHUTDOWN forces a final flush.
-- **Offline-resilient.** If the backend rejects or is unreachable the
-  batch is appended to `data/pending/{matches,histories}.jsonl`. On the
-  next successful submission cycle those files are drained first.
+polls GET /v1/tasks for server-assigned work (match-details, match-history, competitive-updates)
+and dispatches at task-priority. batches results to the backend every 20s or at buffer cap.
+offline-resilient: failed batches spill to JSONL and are drained on the next successful cycle.
 """
 
 from __future__ import annotations
@@ -41,7 +20,6 @@ from services.assembler import CompetitiveUpdateAssembler, HistoryAssembler
 from services.auth_service import RiotSession
 from services.backend_service import BackendCommunicationService
 from services.event_bus import Event, EventBus
-from services.gamestates import GamestateHandler
 from services.request_scheduler import RequestScheduler
 from utils.file_utils import (
     get_pending_competitive_updates_path,
@@ -58,6 +36,7 @@ from utils.models import (
     OwnedItemsResponse,
     PenaltiesResponse,
     PregameMatchResponse,
+    StorefrontResponse,
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -112,11 +91,8 @@ class SubmissionService:
         self._task_task: asyncio.Task[None] | None = None
         self._cancelled: asyncio.Event = asyncio.Event()
 
-        # Count of server tasks still in flight (queued in the scheduler OR
-        # mid-assembly). The scheduler's `task_queue_size` only reflects the
-        # queued portion, so histories/comp-updates (which run as multi-page
-        # assemblies driven by their own asyncio.create_task) wouldn't be
-        # counted there and would let us double-claim.
+        # count of server tasks still in flight (queued + mid-assembly);
+        # scheduler's task_queue_size misses multi-page assemblies, so we track separately to prevent double-claiming
         self._outstanding_tasks: int = 0
 
         self._register()
@@ -134,6 +110,7 @@ class SubmissionService:
         _ = self._bus.on(Event.PENALTIES_UPDATED, self._on_penalties_updated, priority=0)
         _ = self._bus.on(Event.BALANCES_UPDATED, self._on_balances_updated, priority=0)
         _ = self._bus.on(Event.PREGAME_MATCH_UPDATED, self._on_pregame_match_updated, priority=0)
+        _ = self._bus.on(Event.STORE_OFFERS_UPDATED, self._on_store_offers_updated, priority=0)
 
     # ------------------- Event handlers -------------------
 
@@ -171,7 +148,7 @@ class SubmissionService:
         # entry) so non-200 responses still carry a timestamp.
         game_start_millis: int | None = ev.game_start_millis
         if game_start_millis is None and isinstance(ev.match_details, dict):
-            match_info = ev.match_details.get("matchInfo")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+            match_info = ev.match_details.get("matchInfo")
             if isinstance(match_info, dict):
                 raw = match_info.get("gameStartMillis")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
                 if isinstance(raw, int) and raw > 0:
@@ -194,11 +171,8 @@ class SubmissionService:
             _ = asyncio.create_task(self._flush_matches())
 
     async def _on_competitive_update(self, ev: CompetitiveUpdateEvent) -> None:
-        # The assembler already filters discardable statuses (BAD_CLAIMS,
-        # persistent 429) before emitting. Any event that lands here is
-        # either a successful assembly (200 with payload) or an explicit
-        # failure (non-200 with payload=None) that the backend wants to
-        # see so it can confirm the work item as broken.
+        # assembler already filters BAD_CLAIMS/persistent-429; events here are either
+        # 200+payload or a confirmed failure (non-200, payload=None) the backend needs to see
         if ev.riot_status == 0:
             logger.debug(f"Dropping comp-update {ev.puuid[:8]} with sentinel riot_status=0")
             return
@@ -353,6 +327,33 @@ class SubmissionService:
             f"POST /v1/account/match-loadouts -> HTTP {response.status_code} body={response.text[:200]!r}"
         )
         
+    async def _on_store_offers_updated(self, data: StorefrontResponse) -> None:
+        headers = self._backend.game_headers
+        if headers is None:
+            logger.info("Storefront update received but backend game token unavailable; skipping")
+            return
+
+        # Optional store sections (BonusStore, AccessoryStore, etc.) come
+        # and go between rotations. Drop None entries so absent sections
+        # are absent in the payload rather than serialized as nulls.
+        body: dict[str, Any] = {k: v for k, v in asdict(data).items() if v is not None}  # pyright: ignore[reportExplicitAny, reportAny]
+
+        try:
+            response = await self._client.post(
+                f"{self._backend.base_url}/v1/account/storefront",
+                json=body,
+                headers=headers,
+            )
+        except httpx.HTTPError as e:
+            logger.warning(f"POST /v1/account/storefront transport error: {e}")
+            return
+        if response.status_code in (202, 204):
+            logger.info(f"Submitted storefront snapshot (HTTP {response.status_code})")
+            return
+        logger.warning(
+            f"POST /v1/account/storefront -> HTTP {response.status_code} body={response.text[:200]!r}"
+        )
+
     async def _on_pregame_match_updated(self, data: PregameMatchResponse) -> None:
         headers = self._backend.game_headers
         if headers is None:
@@ -437,11 +438,7 @@ class SubmissionService:
                 self._spill_raw(self._pending_comp_updates_path, batch)
 
     async def _post_batch_raw(self, path: str, batch: list[bytes]) -> bool:
-        """POST a batch of pre-serialized JSON items.
-
-        Assembles a JSON array from the raw bytes without round-tripping
-        through Python dicts, keeping memory usage flat.
-        """
+        """POST a batch of pre-serialized JSON items; builds the array from raw bytes to avoid round-tripping through dicts"""
         if not batch:
             return True
         headers = self._backend.game_headers
@@ -473,21 +470,15 @@ class SubmissionService:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("ab") as f:
                 for item in batch:
-                    f.write(item)
-                    f.write(b"\n")
+                    _ = f.write(item)
+                    _ = f.write(b"\n")
             logger.info(f"Spilled {len(batch)} item(s) to {path}")
         except OSError as e:
             logger.warning(f"Could not spill {len(batch)} item(s) to {path}: {e}")
 
     async def _drain_pending(self, path: Path, endpoint: str, batch_max: int) -> None:
-        """Drain pending items from the spill file in bounded chunks.
-
-        Reads at most *batch_max* valid entries per iteration to keep peak
-        memory bounded regardless of how large the spill file has grown.
-        Keeps lines as raw bytes to avoid parsing large JSON into Python
-        dicts. Only lightweight field checks are done via partial parse.
-        Loops until the file is empty or a POST fails.
-        """
+        """drain pending items from the spill file in bounded chunks (batch_max per iteration);
+        keeps raw bytes to minimize memory use; loops until empty or POST fails"""
         if self._backend.game_headers is None:
             return
 
@@ -509,7 +500,7 @@ class SubmissionService:
                             continue
                         # Lightweight validation without full parse
                         try:
-                            probe: dict[str, Any] = json.loads(stripped)  # pyright: ignore[reportAny]
+                            probe: dict[str, Any] = json.loads(stripped)  # pyright: ignore[reportAny, reportExplicitAny]
                         except json.JSONDecodeError:
                             logger.warning(f"Dropping malformed pending entry in {path.name}")
                             continue
@@ -563,13 +554,13 @@ class SubmissionService:
             # opportunity), or the periodic fallback timer.
             cancel_wait = asyncio.create_task(self._cancelled.wait())
             consumed_wait = asyncio.create_task(consumed.wait())
-            done, pending = await asyncio.wait(
+            done, pending = await asyncio.wait(  # pyright: ignore[reportUnusedVariable]
                 {cancel_wait, consumed_wait},
                 timeout=_TASK_POLL_INTERVAL_SEC,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             for p in pending:
-                p.cancel()
+                _ = p.cancel()
                 try:
                     await p
                 except (asyncio.CancelledError, Exception):  # noqa: BLE001
@@ -621,7 +612,7 @@ class SubmissionService:
             counts[key] = counts.get(key, 0) + 1
         breakdown = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         logger.info(
-            f"Received {len(tasks)} task(s) from backend ({breakdown}); "
+            f"Received {len(tasks)} task(s) from backend ({breakdown}); "  # pyright: ignore[reportImplicitStringConcatenation]
             f"outstanding before dispatch={self._outstanding_tasks}"
         )
         for task in tasks:
@@ -682,7 +673,7 @@ class SubmissionService:
             payload, status = await self._session.general_get_details_raw(match_id, shard=shard)
         except Exception:  # noqa: BLE001
             logger.exception(f"Task detail {match_id[:8]} on {shard} raised")
-            await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
+            _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
                 shard=shard, match_id=match_id, riot_status=0, match_details=None,
             ))
             self._outstanding_tasks -= 1
@@ -699,7 +690,7 @@ class SubmissionService:
             )
             return
 
-        await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
+        _ = await self._bus.emit(Event.MATCH_DETAIL_FETCHED, MatchDetailEvent(
             shard=shard, match_id=match_id, riot_status=status, match_details=payload,
         ))
         self._outstanding_tasks -= 1

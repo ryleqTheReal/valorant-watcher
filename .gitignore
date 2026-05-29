@@ -21,3 +21,14 @@ scripts/
 test_*
 old_data/
 swagger.json
+docs/
+
+# Build / packaging artifacts (PyInstaller) users self-compile from src/ + the .spec
+build/
+dist/
+_internal/
+*.exe
+generated-*.ico
+
+# Runtime / local files
+*.log

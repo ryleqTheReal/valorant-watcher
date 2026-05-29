@@ -1,10 +1,4 @@
-"""
-Local Riot Client WebSocket listener.
-
-Connects to the Riot Client's local WebSocket API using lockfile
-credentials and forwards game events to the application event bus.
-Runs in a dedicated daemon thread with its own asyncio event loop.
-"""
+"""local Riot Client WebSocket listener; forwards game events to the event bus via a daemon thread"""
 
 import asyncio
 import json
@@ -29,18 +23,14 @@ from utils.models import (
 logger: logging.Logger = logging.getLogger(__name__)
 
 RETRY_TIMER = 3
-# Riot client websocket uses WAMP v1.0 protocol where you can subscribe to receive
-# certain events using an array [operation: int, subscription_type: str]
-# Operations: 5 -> subscribe, 6 -> unsubscribe
-# subscription_type: OnJsonApiEvent -> everything. All other events can be obtained
-# using the local /help endpoint
+# WAMP v1.0: [operation, subscription_type] where 5 -> subscribe, 6 -> unsubscribe
+# use OnJsonApiEvent as subscription_type for all events; others discoverable via local /help
 WAMP_SUBSCRIPTIONS = [
     [5, "OnJsonApiEvent_chat_v4_presences"],        # /chat/v4/presences
     [5, "OnJsonApiEvent_chat_v4_friendrequests"],   # /chat/v4/friendrequests
     [5, "OnJsonApiEvent_chat_v4_friends"],           # /chat/v4/friends
 ]
 
-# Map WAMP topic URIs to (parser, event) pairs
 _TOPIC_PRESENCE = "OnJsonApiEvent_chat_v4_presences"
 _TOPIC_FRIEND_REQUESTS = "OnJsonApiEvent_chat_v4_friendrequests"
 _TOPIC_FRIENDS = "OnJsonApiEvent_chat_v4_friends"
@@ -48,7 +38,7 @@ _TOPIC_FRIENDS = "OnJsonApiEvent_chat_v4_friends"
 
 @dataclass
 class GameSocket:
-    """WebSocket client for the local Riot Client API."""
+    """WebSocket client for the local Riot Client API"""
 
     lockfile: LockfileData
     bus: EventBus
@@ -67,7 +57,7 @@ class GameSocket:
         self._ssl_ctx.verify_mode = ssl.CERT_NONE
 
     async def connect(self) -> None:
-        """Connect to the local websocket with retry polling, then listen for events."""
+        """connect to the local WebSocket with retry polling, then listen for events"""
 
         while not self._cancelled.is_set():
             try:
@@ -80,14 +70,14 @@ class GameSocket:
                         await websocket.send(json.dumps(sub))
                     logger.info(f"Connected to Riot Client WebSocket on port {self.lockfile.port} ({len(WAMP_SUBSCRIPTIONS)} subscriptions)")
 
-                    # Recv loop
+                    # recv loop
                     while not self._cancelled.is_set():
                         try:
                             raw = await asyncio.wait_for(websocket.recv(), timeout=1.0)
                             self._handle_message(raw)
 
                         except asyncio.TimeoutError:
-                            continue  # No message, check stop flag and loop back
+                            continue  # no message; check cancel flag
                         except UnicodeDecodeError:
                             logger.debug("Skipping non-UTF-8 binary websocket frame")
 
@@ -99,7 +89,7 @@ class GameSocket:
                 await asyncio.sleep(self.retry_timer)
 
     def _handle_message(self, raw: str | bytes) -> None:
-        """Parse a WAMP message and route to the correct event based on topic."""
+        """parse a WAMP message and route to the correct event based on topic"""
 
         try:
             parsed: list[object] = json.loads(str(raw))  # pyright: ignore[reportAny]
@@ -115,7 +105,7 @@ class GameSocket:
             event = Event.WEBSOCKET_EVENT
         elif topic == _TOPIC_FRIEND_REQUESTS:
             data = FriendRequestWebsocketEvent.from_raw_wamp(wrapper)  # pyright: ignore[reportUnknownArgumentType]
-            # Distinguish incoming vs outgoing by subscription field
+            # distinguish incoming vs outgoing by subscription field
             requests = data.data.data.requests if data.data and data.data.data else None
             if requests and hasattr(requests[0], "subscription"):
                 sub = requests[0].subscription   # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportAttributeAccessIssue]
@@ -124,7 +114,7 @@ class GameSocket:
                 event = Event.FRIEND_REQUEST_RECEIVED
         elif topic == _TOPIC_FRIENDS:
             data = FriendWebsocketEvent.from_raw_wamp(wrapper)   # pyright: ignore[reportUnknownArgumentType]
-            # Distinguish add vs remove by eventType
+            # distinguish add vs remove by eventType
             event_type = data.data.eventType if data.data else ""
             event = Event.FRIEND_REMOVED if event_type == "Delete" else Event.FRIEND_ADDED
         else:
@@ -137,17 +127,12 @@ class GameSocket:
         )
 
     def close(self) -> None:
-        """Signal the websocket listener to stop."""
+        """signal the WebSocket listener to stop"""
         self._cancelled.set()
 
 
 class GameSocketHandler:
-    """
-    Manages GameSocket lifecycle via the event bus.
-
-    The websocket session is created when the lockfile becomes available
-    and destroyed when Valorant closes or the app shuts down.
-    """
+    """manages GameSocket lifecycle via the event bus"""
 
     def __init__(self, bus: EventBus, retry_timer: int = RETRY_TIMER) -> None:
         self.bus: EventBus = bus
@@ -157,13 +142,12 @@ class GameSocketHandler:
         self._register()
 
     def _register(self) -> None:
-        """Subscribe to relevant events."""
         _ = self.bus.on(Event.VALORANT_OPENED, self._on_valorant_open, priority=10)
         _ = self.bus.on(Event.VALORANT_CLOSED, self._on_valorant_close, priority=10)
         _ = self.bus.on(Event.SHUTDOWN, self._on_shutdown, priority=0)
 
     async def _on_valorant_open(self, data: LockfileData) -> None:
-        """Start websocket when Valorant opens and lockfile is available."""
+        """start WebSocket when Valorant opens and lockfile is available"""
 
         logger.info("Establishing websocket connection ...")
 
@@ -174,7 +158,7 @@ class GameSocketHandler:
         self._thread.start()
 
     def _run_socket(self) -> None:
-        """Thread entry point => creates a new event loop and runs the websocket listener"""
+        """thread entry point -> creates a new event loop and runs the WebSocket listener"""
         
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -186,15 +170,15 @@ class GameSocketHandler:
             loop.close()
 
     async def _on_valorant_close(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
-        """Valorant closed -> tear down websocket."""
+        """Valorant closed -> tear down WebSocket"""
         await self._cleanup()
 
     async def _on_shutdown(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportUnusedParameter, reportAny]
-        """App shutting down -> tear down websocket."""
+        """app shutting down -> tear down WebSocket"""
         await self._cleanup()
 
     async def _cleanup(self) -> None:
-        """Close the websocket and wait for the thread to finish."""
+        """close the WebSocket and join the thread"""
         if self.gamesocket:
             self.gamesocket.close()
             self.gamesocket = None
