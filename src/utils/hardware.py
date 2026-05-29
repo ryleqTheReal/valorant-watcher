@@ -1,9 +1,4 @@
-"""
-Collects PC hardware specs and computes a stable HWID hash.
-
-Windows-only for now. Runs once at startup via a single PowerShell
-call that queries WMI/CIM and returns structured JSON.
-"""
+"""collects Windows PC hardware specs via a single PowerShell/WMI call; computes a stable HWID hash"""
 
 from __future__ import annotations
 
@@ -11,12 +6,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import subprocess
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("hardware")
 
 
-# ── Component dataclasses ────────────────────────────────────────
+# ---- component dataclasses --------------------------------------------------------------------------------
 
 @dataclass
 class CpuInfo:
@@ -90,7 +86,7 @@ class InputDevice:
     manufacturer: str = ""
 
 
-# ── Top-level snapshot ───────────────────────────────────────────
+# ---- top-level snapshot --------------------------------------------------------------------------------------
 
 @dataclass
 class HardwareSnapshot:
@@ -107,7 +103,7 @@ class HardwareSnapshot:
     hwid_hash: str = ""
 
     def to_dict(self) -> dict[str, object]:
-        """Flat-ish dict ready for JSON serialisation / server submission."""
+        """flat-ish dict ready for JSON serialisation / server submission"""
         return {
             "hwid_hash": self.hwid_hash,
             "device_type": self.device_type,
@@ -178,7 +174,7 @@ class HardwareSnapshot:
         }
 
 
-# ── PowerShell query (single call, all data) ────────────────────
+# ---- PowerShell query (single call, all data) ----------------------------------------
 
 _PS_SCRIPT = r"""
 $vramRegistry = @{}
@@ -227,28 +223,27 @@ $d = @{
 $d | ConvertTo-Json -Depth 3 -Compress
 """
 
-# Type alias for raw JSON dicts from PowerShell.  json.loads returns
-# dict[str, ...] but after isinstance-narrowing basedpyright infers
-# dict[Unknown, Unknown].  Using a dedicated alias + casts keeps the
-# ignores concentrated in one place.
+# type alias for raw JSON dicts from PowerShell; isinstance-narrowing causes pyright to infer
+# dict[Unknown, Unknown], so a dedicated alias keeps ignores concentrated in one place
 _RawDict = dict[str, object]
 
 
 def _as_raw(val: object) -> _RawDict | None:
-    """Return val as _RawDict if it's a dict, else None."""
+    """return val as _RawDict if it's a dict, else None"""
     if isinstance(val, dict):
         return val  # type: ignore[return-value]  # pyright: ignore[reportUnknownVariableType]
     return None
 
 
 async def _run_powershell(script: str) -> _RawDict:
-    """Execute a PowerShell script and return parsed JSON."""
-    # Force UTF-8 output so non-ASCII characters (e.g. Chinese, German umlauts) survive
+    """execute a PowerShell script and return parsed JSON"""
+    # force UTF-8 output so non-ASCII characters (e.g. Chinese, German umlauts) survive
     utf8_prefix = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
     proc = await asyncio.create_subprocess_exec(
         "powershell", "-NoProfile", "-NonInteractive", "-Command", utf8_prefix + script,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW,
     )
     stdout, stderr = await proc.communicate()
 
@@ -263,7 +258,7 @@ async def _run_powershell(script: str) -> _RawDict:
         return {}
 
 
-# ── Parsing helpers ──────────────────────────────────────────────
+# ---- parsing helpers --------------------------------------------------------------------------------------------
 
 def _str(val: object) -> str:
     return str(val).strip() if val is not None else ""
@@ -277,7 +272,7 @@ def _int(val: object) -> int:
 
 
 def _ensure_list(val: object) -> list[_RawDict]:
-    """WMI returns a dict for single items, list for multiple."""
+    """WMI returns a dict for single items, list for multiple"""
     if isinstance(val, dict):
         return [val]  # type: ignore[list-item]
     if isinstance(val, list):
@@ -285,7 +280,7 @@ def _ensure_list(val: object) -> list[_RawDict]:
     return []
 
 
-# ── Component parsers ────────────────────────────────────────────
+# ---- component parsers ----------------------------------------------------------------------------------------
 
 def _parse_cpu(raw: object) -> CpuInfo:
     d = _as_raw(raw)
@@ -304,7 +299,7 @@ def _parse_gpus(raw: object) -> tuple[list[GpuInfo], list[DisplayInfo]]:
     gpus: list[GpuInfo] = []
     displays: list[DisplayInfo] = []
     for item in _ensure_list(raw):
-        # Prefer registry VRAM (accurate) over WMI AdapterRAM (capped at 4 GB)
+        # prefer registry VRAM (accurate) over WMI AdapterRAM (capped at 4 GB)
         registry_vram = _int(item.get("RegistryVRAM"))
         wmi_vram = _int(item.get("AdapterRAM"))
         vram_bytes = registry_vram if registry_vram else wmi_vram
@@ -408,7 +403,7 @@ def _parse_input_devices(keyboards: object, mice: object) -> list[InputDevice]:
 
 
 def _parse_device_type(raw: object) -> str:
-    """Map Win32_SystemEnclosure ChassisTypes to a human-readable device type."""
+    """map Win32_SystemEnclosure ChassisTypes to a human-readable device type"""
     _DESKTOP = {3, 4, 5, 6, 7, 15, 16, 24, 35}  # Desktop, Tower, Mini Tower, Pizza Box, etc.
     _LAPTOP = {8, 9, 10, 14, 31, 32}             # Portable, Laptop, Notebook, Sub Notebook, Convertible, Detachable
     _TABLET = {30}                                 # Tablet
@@ -430,15 +425,10 @@ def _parse_device_type(raw: object) -> str:
     return "Unknown"
 
 
-# ── HWID hashing ─────────────────────────────────────────────────
+# ---- HWID hashing --------------------------------------------------------------------------------------------------
 
 def _compute_hwid(raw: _RawDict) -> str:
-    """
-    SHA-256 of stable hardware identifiers:
-    motherboard serial + CPU ProcessorId + sorted disk model names.
-
-    Returns hex digest. Empty string if nothing could be read.
-    """
+    """SHA-256 of stable hardware identifiers (mobo serial + CPU ProcessorId + disk names); empty string if nothing found"""
     parts: list[str] = []
 
     mobo = _as_raw(raw.get("motherboard"))
@@ -460,10 +450,10 @@ def _compute_hwid(raw: _RawDict) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
-# ── Public API ───────────────────────────────────────────────────
+# ---- public API ------------------------------------------------------------------------------------------------------
 
 async def collect_hardware() -> HardwareSnapshot:
-    """Collect all hardware specs. Call once at startup."""
+    """collect all hardware specs; call once at startup"""
     raw = await _run_powershell(_PS_SCRIPT)
     if not raw:
         logger.warning("Hardware collection returned empty — using defaults")

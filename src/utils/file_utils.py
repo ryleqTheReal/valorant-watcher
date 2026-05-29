@@ -2,12 +2,26 @@ from functools import cache
 from pathlib import Path
 import platform
 import logging
+import sys
 
 from utils.exceptions import PathResolutionError, UnknownPlatformError
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 """Here we dump all low-level path resolution functinons and anything regarding paths"""
+
+
+@cache
+def get_app_base_dir() -> Path:
+    """Project root when running from source; directory of the .exe when frozen.
+
+    Why: PyInstaller --onefile sets __file__ inside the temp _MEIPASS extraction
+    dir, so the old parents[2] trick pointed at the wrong place for bundled
+    config/data files. sys.executable's parent is the only stable anchor when
+    frozen."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
 
 def get_default_lockfile_path() -> Path:
     """Return the platform-dependent default path to the lockfile
@@ -65,7 +79,7 @@ def get_config_path() -> Path:
     Returns:
         Path: The path object to the config file
     """
-    config_path: Path = Path(__file__).resolve().parents[2] / "config.json"
+    config_path: Path = get_app_base_dir() / "config.json"
     if not config_path.exists():
         logger.error("The config file does not exist, cannot launch properly.")
         raise PathResolutionError("The config file does not exist, cannot launch properly.")
@@ -76,10 +90,28 @@ def get_config_path() -> Path:
 def get_watermark_path() -> Path:
     """Return the path to the local match watermark file.
        Stored next to config.json in the project root: data/match_watermarks.json"""
-    return Path(__file__).resolve().parents[2] / "data" / "match_watermarks.json"
+    return get_app_base_dir() / "data" / "match_watermarks.json"
 
 
 @cache
 def get_auth_tokens_path() -> Path:
     """Return the path to the persisted backend auth tokens (data/auth.json)."""
-    return Path(__file__).resolve().parents[2] / "data" / "auth.json"
+    return get_app_base_dir() / "data" / "auth.json"
+
+
+@cache
+def get_pending_matches_path() -> Path:
+    """JSONL spillover for match-detail submissions that the backend hasn't acked yet."""
+    return get_app_base_dir() / "data" / "pending" / "matches.jsonl"
+
+
+@cache
+def get_pending_histories_path() -> Path:
+    """JSONL spillover for match-history submissions that the backend hasn't acked yet."""
+    return get_app_base_dir() / "data" / "pending" / "histories.jsonl"
+
+
+@cache
+def get_pending_competitive_updates_path() -> Path:
+    """JSONL spillover for competitive-updates submissions the backend hasn't acked yet."""
+    return get_app_base_dir() / "data" / "pending" / "competitive_updates.jsonl"

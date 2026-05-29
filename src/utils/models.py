@@ -1,10 +1,4 @@
-"""
-Shared data models for the Valorant Stats App.
-
-Dataclasses used across multiple modules live here.
-Internal dataclasses (e.g. Listener in the EventBus)
-stay in their own module.
-"""
+"""shared data models; cross-module dataclasses live here (internal ones stay in their own module)"""
 
 from __future__ import annotations
 
@@ -21,15 +15,15 @@ from utils.exceptions import EndpointValidationError, StructureValidationError
 
 T = TypeVar("T")
 
+
+def _filter_known(cls: type, data: dict[str, object]) -> dict[str, object]:
+    """drop unknown keys so dataclass construction survives upstream schema additions"""
+    known = {f.name for f in fields(cls)}
+    return {k: v for k, v in data.items() if k in known}
+
 @dataclass
 class LockfileData:
-    """
-    Parsed data from the Riot Client lockfile.
-
-    The lockfile contains a single line in the format:
-        name:pid:port:password:protocol
-        e.g.: riot:12345:52735:abcdefg123:https
-    """
+    """parsed data from the Riot Client lockfile (format: name:pid:port:password:protocol)"""
 
     name: str
     pid: int
@@ -39,7 +33,7 @@ class LockfileData:
 
     @classmethod
     def from_file(cls, path: Path) -> LockfileData:
-        """Read and parse the lockfile"""
+        """read and parse the lockfile"""
 
         content = path.read_text(encoding="utf-8").strip()
         parts = content.split(":")
@@ -67,37 +61,30 @@ class LockfileData:
     
     @property
     def auth_header(self) -> str:
-        """Basic auth header for the local Riot API."""
+        """basic auth header for the local Riot API"""
         token = base64.b64encode(f"riot:{self.password}".encode()).decode()
         return f"Basic {token}"
 
 
 @dataclass
 class AppConfig:
-    """Application config loaded from config.json."""
+    """application config loaded from config.json"""
 
     server_base_url: str | None = None
     poll_interval: int = 3
     collect_interval: int = 60
     enable_data_sending: bool = True
     ratelimit_timeout: int = 60
-    ratelimit_offset: int = 60              # Seconds to wait after state change before making API calls
-    ratelimit_initial_limit: int = 6        # Max requests in the first minute after offset ends
-    ratelimit_sustained_limit: int = 20     # Max requests per minute after the first window
-    ratelimit_aggressive_limit: int = 24    # Max requests per minute when no other apps are competing (pre-game, AFK)
+    ratelimit_offset: int = 60                  # Seconds to wait after state change before making API calls
+    match_details_interval_ms: int = 1700       # Min ms between subsequent /match-details requests (server recovers 1 every 1700ms)
+    match_history_interval_ms: int = 2000       # Min ms between subsequent /match-history requests (TBD: replace once measured)
+    competitive_updates_interval_ms: int = 2050 # Min ms between subsequent /competitiveupdates requests
 
     @classmethod
     def from_config_dict(cls, data: dict[str, object]) -> AppConfig:
-        """Create an AppConfig from a config dictionary obtained by config.json
+        """create an AppConfig from a config.json dict"""
 
-        Args:
-            data (dict[str, object]): The parsed config.json dict
-
-        Returns:
-            AppConfig: Returns the AppConfig object
-        """
-
-        # The defined fields of the dataclass: server_base_url, poll_interval ...
+        # the defined fields of the dataclass: server_base_url, poll_interval ...
         known_fields = cls.__dataclass_fields__
         kwargs = {k: v for k, v in data.items() if k in known_fields}
         return cls(**kwargs)  # pyright: ignore[reportArgumentType]
@@ -105,13 +92,7 @@ class AppConfig:
 
 @dataclass(frozen=True)
 class RegionInfo:
-    """Region data extracted from Valorant log files.
-
-    Attributes:
-        pd_shard:  Platform-data shard  (e.g. "eu", "na", "ap", "kr")
-        glz_shard: GLZ shard            (e.g. "eu-1", "na-1")
-        glz_region: GLZ region          (e.g. "eu", "na")
-    """
+    """region data extracted from Valorant log files (pd_shard e.g. "eu", glz_shard e.g. "eu-1")"""
 
     pd_shard: str
     glz_shard: str
@@ -135,7 +116,7 @@ class EndpointURI:
                 message=f"Endpoint must be a path, not a full URL: '{endpoint}'"
             )
 
-        # Not using self.uri because that would raise Error due to frozen=True immutability !
+        # not using self.uri because frozen=True would raise FrozenInstanceError
         object.__setattr__(self, "uri", endpoint)
         object.__setattr__(self, "parsed_endpoint", parsed)
 
@@ -145,13 +126,7 @@ class EndpointURI:
 
 @dataclass
 class ValorantApiResponse[T]:
-    """Generic wrapper for valorant-api.com responses.
-
-    Attributes:
-        data: The parsed response payload, typed per endpoint.
-        status: The HTTP status code of the response.
-        error: Optional error message if the request failed.
-    """
+    """generic wrapper for valorant-api.com responses"""
 
     data: T
     status: HTTPStatus
@@ -159,7 +134,7 @@ class ValorantApiResponse[T]:
 
 @dataclass
 class VersionData:
-    """Response obtained by https://valorant-api.com/v1/version"""
+    """response obtained by https://valorant-api.com/v1/version"""
     
     manifestId: str
     branch: str
@@ -174,7 +149,7 @@ class VersionData:
 
 @dataclass
 class EntitlementsTokenResponse:
-    """Response obtained by https://127.0.0.1:{port}/entitlements/v1/token"""
+    """response obtained by https://127.0.0.1:{port}/entitlements/v1/token"""
     accessToken: str
     entitlements: tuple[Any]  # pyright: ignore[reportExplicitAny]
     issuer: str
@@ -187,7 +162,7 @@ class EntitlementsTokenResponse:
 
 @dataclass
 class _UserInfoPassword:
-    """Password metadata from the userInfo payload."""
+    """password metadata from the userInfo payload"""
     cng_at: int | None = None       # Timestamp of last password change
     reset: bool | None = None       # Whether the password was reset
     must_reset: bool | None = None  # Whether a password reset is required
@@ -195,17 +170,13 @@ class _UserInfoPassword:
 
 @dataclass
 class _UserInfoBan:
-    """Ban/restriction info from the userInfo payload."""
+    """ban/restriction info from the userInfo payload"""
     restrictions: list[object] | None = None  # Active account restrictions
 
 
 @dataclass
 class _UserInfoAccount:
-    """Account details from the userInfo payload.
-
-    Note: the JSON key ``"type"`` is mapped to ``account_type`` to avoid
-    shadowing the built-in :func:`type`.
-    """
+    """account details from the userInfo payload; JSON key type mapped to account_type to avoid shadowing builtin"""
     account_type: int | None = None   # Account type identifier (JSON key: "type")
     state: str | None = None          # Account state, e.g. "ENABLED"
     adm: bool | None = None           # Whether the account has admin privileges
@@ -216,12 +187,7 @@ class _UserInfoAccount:
 
 @dataclass
 class UserInfo:
-    """Parsed inner JSON from the userInfo field.
-
-    The raw API returns userInfo as a JSON *string*; this dataclass
-    represents the parsed contents.  All fields are optional as the
-    schema is speculative (based on a single sample).
-    """
+    """parsed inner userInfo JSON; all fields optional (schema is speculative)"""
     sub: str | None = None                                      # Player UUID
     country: str | None = None                                  # ISO country code (e.g. "deu")
     email_verified: bool | None = None                          # Whether the email is verified
@@ -250,7 +216,7 @@ class UserInfo:
             known = {f.name for f in fields(_UserInfoBan)}
             self.ban = _UserInfoBan(**{k: v for k, v in self.ban.items() if k in known})  # pyright: ignore[reportArgumentType]
         if isinstance(self.acct, dict):
-            # Remap "type" -> "account_type" to avoid shadowing the builtin
+            # remap "type" -> "account_type" to avoid shadowing the builtin
             remapped = {("account_type" if k == "type" else k): v for k, v in self.acct.items()}
             known = {f.name for f in fields(_UserInfoAccount)}
             self.acct = _UserInfoAccount(**{k: v for k, v in remapped.items() if k in known})  # pyright: ignore[reportArgumentType]
@@ -258,12 +224,7 @@ class UserInfo:
 
 @dataclass
 class UserInfoResponse:
-    """Response from GET /rso-auth/v1/authorization/userinfo.
-
-    The API returns ``{"userInfo": "<json-string>"}`` — the ``userInfo``
-    value is a JSON-encoded string, not a nested object.  ``__post_init__``
-    parses it into a :class:`UserInfo` instance.
-    """
+    """response from GET /rso-auth/v1/authorization/userinfo; userInfo is a JSON-encoded string -> parsed to UserInfo in __post_init__"""
     userInfo: UserInfo | str | None = None
 
     def __post_init__(self) -> None:
@@ -275,28 +236,25 @@ class UserInfoResponse:
 
 @dataclass
 class _JWTPartialPayload:
-    """Nested object inside the JWT payload (e.g. "pp", "dat", "plt")."""
+    """nested object inside the JWT payload (e.g. "pp", "dat", "plt")"""
     c: str = ""
 
 @dataclass
 class _JWTPlatform:
-    """Platform info from the JWT payload."""
+    """platform info from the JWT payload"""
     dev: str = ""
     id: str = ""
 
 @dataclass
 class _JWTDat:
-    """Session data from the JWT payload."""
+    """session data from the JWT payload"""
     c: str = ""
     lid: str = ""
     r: str = ""
 
 @dataclass
 class AccessTokenJWT:
-    """Decoded payload of the Riot access token JWT.
-
-    Constructed via: AccessTokenJWT(**decoded_payload)
-    """
+    """decoded payload of the Riot access token JWT"""
     sub: str
     iss: str
     exp: int
@@ -327,13 +285,7 @@ class AccessTokenJWT:
 
 @dataclass
 class WebsocketEventWrapper[T]:
-    """Wrapper for a WAMP v1.0 EVENT message: [8, topic_uri, event_payload].
-
-    Attributes:
-        opcode: WAMP message type (8 = EVENT).
-        topic:  The subscription URI that triggered this event.
-        data:   The event payload, typed per consumer.
-    """
+    """wAMP v1.0 EVENT message wrapper [8, topic_uri, event_payload]"""
 
     opcode: int
     topic: str
@@ -341,11 +293,7 @@ class WebsocketEventWrapper[T]:
 
     @classmethod
     def from_raw(cls, raw: list[object]) -> WebsocketEventWrapper[T]:
-        """Parse a raw WAMP EVENT array into a typed wrapper.
-
-        Raises:
-            ValueError: If the array is too short or the opcode is not 8.
-        """
+        """parse a raw WAMP EVENT array into a typed wrapper; raises ValueError if too short or opcode != 8"""
         if len(raw) < 3:
             raise ValueError(f"Expected at least 3 elements, got {len(raw)}")
 
@@ -415,11 +363,12 @@ class _PlayerPresenceData:
     accountLevel: int | None = None
     competitiveTier: int | None = None
     leaderboardPosition: int | None = None
+    platformOverride: str | None = None
 
 
 @dataclass
 class PresencePrivate:
-    """Decoded base64 JSON from the 'private' field of a presence object."""
+    """decoded base64 JSON from the 'private' field of a presence object"""
 
     isValid: bool | None = None
     isIdle: bool | None = None
@@ -437,24 +386,24 @@ class PresencePrivate:
 
     def __post_init__(self) -> None:
         if isinstance(self.premierPresenceData, dict):
-            self.premierPresenceData = _PremierPresenceData(**self.premierPresenceData)  # pyright: ignore[reportArgumentType]
+            self.premierPresenceData = _PremierPresenceData(**_filter_known(_PremierPresenceData, self.premierPresenceData))  # pyright: ignore[reportArgumentType]
         if isinstance(self.matchPresenceData, dict):
-            self.matchPresenceData = _MatchPresenceData(**self.matchPresenceData)  # pyright: ignore[reportArgumentType]
+            self.matchPresenceData = _MatchPresenceData(**_filter_known(_MatchPresenceData, self.matchPresenceData))  # pyright: ignore[reportArgumentType]
         if isinstance(self.partyPresenceData, dict):
-            self.partyPresenceData = _PartyPresenceData(**self.partyPresenceData)  # pyright: ignore[reportArgumentType]
+            self.partyPresenceData = _PartyPresenceData(**_filter_known(_PartyPresenceData, self.partyPresenceData))  # pyright: ignore[reportArgumentType]
         if isinstance(self.playerPresenceData, dict):
-            self.playerPresenceData = _PlayerPresenceData(**self.playerPresenceData)  # pyright: ignore[reportArgumentType]
+            self.playerPresenceData = _PlayerPresenceData(**_filter_known(_PlayerPresenceData, self.playerPresenceData))  # pyright: ignore[reportArgumentType]
 
     @classmethod
     def from_base64(cls, encoded: str) -> PresencePrivate:
-        """Decode a base64-encoded JSON string into a PresencePrivate."""
+        """decode a base64-encoded JSON string into a PresencePrivate"""
         decoded: dict[str, object] = json.loads(base64.b64decode(encoded).decode())  # pyright: ignore[reportAny]
-        return cls(**decoded)  # pyright: ignore[reportArgumentType]
+        return cls(**_filter_known(cls, decoded))  # pyright: ignore[reportArgumentType]
 
 
 @dataclass
 class Presence:
-    """A single presence entry from /chat/v4/presences."""
+    """a single presence entry from /chat/v4/presences"""
 
     activePlatform: str | None = None
     actor: str | None = None
@@ -487,32 +436,28 @@ class Presence:
                 return
             padded = self.private + "=" * (-len(self.private) % 4)
             decoded: dict[str, object] = json.loads(base64.b64decode(padded).decode())  # pyright: ignore[reportAny]
-            self.private = PresencePrivate(**decoded)  # pyright: ignore[reportArgumentType]
+            self.private = PresencePrivate(**_filter_known(PresencePrivate, decoded))  # pyright: ignore[reportArgumentType]
 
 
 @dataclass
 class PresenceResponse:
-    """Parsed presence payload from a /chat/v4/presences event."""
+    """parsed presence payload from a /chat/v4/presences event"""
 
     presences: list[Presence] | list[dict[str, object]] | None = None
 
     def __post_init__(self) -> None:
         if self.presences and isinstance(self.presences[0], dict):
-            self.presences = [Presence(**p) for p in self.presences]  # pyright: ignore[reportCallIssue]
+            self.presences = [Presence(**_filter_known(Presence, p)) for p in self.presences]  # pyright: ignore[reportArgumentType]
 
     @classmethod
     def from_json(cls, data: dict[str, object]) -> PresenceResponse:
-        """Create a PresenceResponse from an API JSON dict."""
-        return cls(**data)  # pyright: ignore[reportArgumentType]
+        """create a PresenceResponse from an API JSON dict"""
+        return cls(**_filter_known(cls, data))  # pyright: ignore[reportArgumentType]
 
 
 @dataclass
 class WebsocketEventEnvelope[T]:
-    """Intermediate envelope wrapping the actual event payload.
-
-    The WAMP data[2] payload contains this structure:
-        {"data": {...}, "eventType": "Update", "uri": "/chat/v4/presences"}
-    """
+    """intermediate envelope wrapping the event payload (data, eventType, uri)"""
 
     data: T
     eventType: str = ""
@@ -521,18 +466,15 @@ class WebsocketEventEnvelope[T]:
 
 @dataclass
 class PresenceWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[PresenceResponse]]):
-    """A fully parsed WAMP presence event.
-
-    Structure: WAMP wrapper -> event envelope -> PresenceResponse -> list[Presence]
-    """
+    """fully parsed WAMP presence event (wrapper -> envelope -> PresenceResponse -> list[Presence])"""
 
     @classmethod
     def from_raw_string(cls, raw: str) -> PresenceWebsocketEvent:
-        """Parse a raw websocket message string into a fully typed presence event."""
+        """parse a raw websocket message string into a fully typed presence event"""
         parsed: list[object] = json.loads(raw)  # pyright: ignore[reportAny]
         wrapper = WebsocketEventWrapper.from_raw(parsed)  # pyright: ignore[reportUnknownVariableType]
         payload: dict[str, object] = wrapper.data  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-        presence_response = PresenceResponse(**payload.get("data", {}))  # pyright: ignore[reportCallIssue, reportUnknownMemberType]
+        presence_response = PresenceResponse(**_filter_known(PresenceResponse, payload.get("data", {})))  # pyright: ignore[reportUnknownMemberType, reportArgumentType]
         envelope = WebsocketEventEnvelope(
             data=presence_response,
             eventType=str(payload.get("eventType", "")),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
@@ -545,7 +487,7 @@ class PresenceWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[Presen
 
 @dataclass
 class FriendRequest:
-    """A single pending friend request (incoming or outgoing)."""
+    """a single pending friend request (incoming or outgoing)"""
 
     game_name: str | None = None
     game_tag: str | None = None
@@ -560,7 +502,7 @@ class FriendRequest:
 
 @dataclass
 class FriendRequestsResponse:
-    """Response from GET /chat/v4/friendrequests."""
+    """response from GET /chat/v4/friendrequests"""
 
     requests: list[FriendRequest] | list[dict[str, object]] | None = None
 
@@ -576,14 +518,11 @@ class FriendRequestsResponse:
 
 @dataclass
 class FriendRequestWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[FriendRequestsResponse]]):
-    """A fully parsed WAMP friend request event.
-
-    Structure: WAMP wrapper -> event envelope -> FriendRequestsResponse -> list[FriendRequest]
-    """
+    """fully parsed WAMP friend request event (wrapper -> envelope -> FriendRequestsResponse)"""
 
     @classmethod
     def from_raw_wamp(cls, wrapper: WebsocketEventWrapper[object]) -> FriendRequestWebsocketEvent:
-        """Parse from a pre-parsed WAMP wrapper."""
+        """parse from a pre-parsed WAMP wrapper"""
         payload: dict[str, object] = wrapper.data  # pyright: ignore[reportAssignmentType]
         response = FriendRequestsResponse(**payload.get("data", {}))  # pyright: ignore[reportCallIssue]
         envelope = WebsocketEventEnvelope(
@@ -598,7 +537,7 @@ class FriendRequestWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[F
 
 @dataclass
 class Friend:
-    """A single friend entry from /chat/v4/friends."""
+    """a single friend entry from /chat/v4/friends"""
 
     activePlatform: str | None = None
     displayGroup: str | None = None
@@ -615,7 +554,7 @@ class Friend:
 
 @dataclass
 class FriendResponse:
-    """Parsed payload from a /chat/v4/friends event."""
+    """parsed payload from a /chat/v4/friends event"""
 
     friends: list[Friend] | list[dict[str, object]] | None = None
 
@@ -626,14 +565,11 @@ class FriendResponse:
 
 @dataclass
 class FriendWebsocketEvent(WebsocketEventWrapper[WebsocketEventEnvelope[FriendResponse]]):
-    """A fully parsed WAMP friend event.
-
-    Structure: WAMP wrapper -> event envelope -> FriendResponse -> list[Friend]
-    """
+    """fully parsed WAMP friend event (wrapper -> envelope -> FriendResponse)"""
 
     @classmethod
     def from_raw_wamp(cls, wrapper: WebsocketEventWrapper[object]) -> FriendWebsocketEvent:
-        """Parse from a pre-parsed WAMP wrapper."""
+        """parse from a pre-parsed WAMP wrapper"""
         payload: dict[str, object] = wrapper.data  # pyright: ignore[reportAssignmentType]
         response = FriendResponse(**payload.get("data", {}))  # pyright: ignore[reportCallIssue]
         envelope = WebsocketEventEnvelope(
@@ -688,7 +624,7 @@ class PlayerLoadoutResponse:
     
 @dataclass
 class _EntitlementItem:
-    """A single owned item entry."""
+    """a single owned item entry"""
     TypeID: str | None = None
     ItemID: str | None = None
     InstanceID: str | None = None
@@ -696,7 +632,7 @@ class _EntitlementItem:
 
 @dataclass
 class _EntitlementsByType:
-    """A group of owned items sharing the same ItemTypeID."""
+    """a group of owned items sharing the same ItemTypeID"""
     ItemTypeID: str | None = None
     Entitlements: list[_EntitlementItem] | list[dict[str, object]] | None = None
 
@@ -706,7 +642,7 @@ class _EntitlementsByType:
 
 @dataclass
 class OwnedItemsResponse:
-    """Response from GET /store/v1/entitlements/{puuid}/{ItemTypeID?}"""
+    """response from GET /store/v1/entitlements/{puuid}/{ItemTypeID?}"""
     EntitlementsByTypes: list[_EntitlementsByType] | list[dict[str, object]] | None = None
 
     def __post_init__(self) -> None:
@@ -715,7 +651,7 @@ class OwnedItemsResponse:
 
     @property
     def item_count(self) -> int:
-        """Total number of owned items across all item types."""
+        """total number of owned items across all item types"""
         if not self.EntitlementsByTypes:
             return 0
         return sum(
@@ -726,8 +662,7 @@ class OwnedItemsResponse:
 
 
 class ItemTypes(Enum):
-    """Collection of the item types mapped to their ItemTypeID
-       This is especially useful for GET PD /store/v1/entitlements/{puuid}/{ItemTypeID}"""
+    """item type UUIDs for GET /store/v1/entitlements/{puuid}/{ItemTypeID}"""
     
     AGENTS = "01bb38e1-da47-4e6a-9b3d-945fe4655707"
     SPRAYS = "d5f120f8-ff8c-4aac-92ea-f2b5acbe9475"
@@ -739,26 +674,27 @@ class ItemTypes(Enum):
     
 @dataclass
 class _XPProgress:
-    """Level and XP progress snapshot."""
+    """level and XP progress snapshot"""
     Level: int | None = None              # Account level
     XP: int | None = None                 # XP within the current level
 
 @dataclass
 class _XPSource:
-    """A single XP source entry (e.g. time-played, match-win)."""
+    """a single XP source entry (e.g. time-played, match-win)"""
     ID: str | None = None                 # Source type: "time-played", "match-win", "first-win-of-the-day"
     Amount: int | None = None             # XP awarded from this source
 
 @dataclass
 class _XPMultiplier:
-    """A single XP multiplier entry."""
+    """a single XP multiplier entry"""
     ID: str | None = None                 # Multiplier type: e.g. "penalty-modifier"
     Value: float | None = None            # Multiplier value (0 = no XP granted)
 
 @dataclass
 class _XPHistoryEntry:
-    """A single match XP history entry."""
+    """a single match XP history entry"""
     ID: str | None = None                                                       # Match UUID
+    CreatedAt: str | None = None                                                # ISO 8601 record creation time
     MatchStart: str | None = None                                               # ISO 8601 match start time
     StartProgress: _XPProgress | dict[str, object] | None = None                # Level/XP before the match
     EndProgress: _XPProgress | dict[str, object] | None = None                  # Level/XP after the match
@@ -768,22 +704,22 @@ class _XPHistoryEntry:
 
     def __post_init__(self) -> None:
         if isinstance(self.StartProgress, dict):
-            self.StartProgress = _XPProgress(**self.StartProgress)  # pyright: ignore[reportArgumentType]
+            self.StartProgress = _XPProgress(**_filter_known(_XPProgress, self.StartProgress))  # pyright: ignore[reportArgumentType]
         if isinstance(self.EndProgress, dict):
-            self.EndProgress = _XPProgress(**self.EndProgress)  # pyright: ignore[reportArgumentType]
+            self.EndProgress = _XPProgress(**_filter_known(_XPProgress, self.EndProgress))  # pyright: ignore[reportArgumentType]
         if self.XPSources and isinstance(self.XPSources[0], dict):
-            self.XPSources = [_XPSource(**s) for s in self.XPSources]  # pyright: ignore[reportCallIssue]
+            self.XPSources = [_XPSource(**_filter_known(_XPSource, s)) for s in self.XPSources]  # pyright: ignore[reportArgumentType]
         if self.XPMultipliers and isinstance(self.XPMultipliers[0], dict):
-            self.XPMultipliers = [_XPMultiplier(**m) for m in self.XPMultipliers]  # pyright: ignore[reportCallIssue]
+            self.XPMultipliers = [_XPMultiplier(**_filter_known(_XPMultiplier, m)) for m in self.XPMultipliers]  # pyright: ignore[reportArgumentType]
 
 @dataclass
 class _XPMultiplierEffect:
-    """XP multiplier penalty effect."""
+    """xP multiplier penalty effect"""
     XPMultiplier: float | None = None         # Multiplier applied (0 = no XP)
 
 @dataclass
 class _PenaltyEntry:
-    """A single penalty entry from the penalties endpoint."""
+    """a single penalty entry from the penalties endpoint"""
     ID: str | None = None                                                           # Penalty UUID
     IssuingGameStartUnixMillis: int | None = None                                   # Match start time (Unix ms)
     IssuingMatchID: str | None = None                                               # Match UUID that triggered the penalty
@@ -814,14 +750,14 @@ class _PenaltyEntry:
 
 @dataclass
 class _InfractionEntry:
-    """A single infraction entry describing the rule violation."""
+    """a single infraction entry describing the rule violation"""
     ID: str | None = None                     # Infraction UUID (referenced by PenaltyEntry.InfractionID)
     Name: str | None = None                   # Infraction type: "AFK_SEVERE_NONDISRUPTIVE", "NONPARTICIPATION_COMBAT_NONDISRUPTIVE"
     RatingName: str | None = None             # Rating category: "afk", "damageParticipationOutgoingNonDisruptive"
 
 @dataclass
 class PenaltiesResponse:
-    """Response from GET /restrictions/v3/penalties"""
+    """response from GET /restrictions/v3/penalties"""
     Subject: str | None = None                                                              # Player UUID (PUUID)
     Penalties: list[_PenaltyEntry] | list[dict[str, object]] | None = None                  # Active penalties
     Infractions: list[_InfractionEntry] | list[dict[str, object]] | None = None             # Infractions that triggered the penalties
@@ -835,7 +771,7 @@ class PenaltiesResponse:
 
 @dataclass
 class AccountXPResponse:
-    """Response from GET /account-xp/v1/players/{puuid}"""
+    """response from GET /account-xp/v1/players/{puuid}"""
     Version: int | None = None                                                      # Schema version
     Subject: str | None = None                                                       # Player UUID (PUUID)
     Progress: _XPProgress | dict[str, object] | None = None                          # Current level/XP progress
@@ -845,15 +781,37 @@ class AccountXPResponse:
 
     def __post_init__(self) -> None:
         if isinstance(self.Progress, dict):
-            self.Progress = _XPProgress(**self.Progress)  # pyright: ignore[reportArgumentType]
+            self.Progress = _XPProgress(**_filter_known(_XPProgress, self.Progress))  # pyright: ignore[reportArgumentType]
         if self.History and isinstance(self.History[0], dict):
-            self.History = [_XPHistoryEntry(**h) for h in self.History]  # pyright: ignore[reportCallIssue]
+            self.History = [_XPHistoryEntry(**_filter_known(_XPHistoryEntry, h)) for h in self.History]  # pyright: ignore[reportArgumentType]
+
+@dataclass
+class _CurrencyLimit:
+    """a single per-currency limit entry"""
+    Limits: dict[str, dict[str, object]] | None = None    # keyed by limit-UUID -> {"amount": int, "limitType": str}
+
+@dataclass
+class BalancesResponse:
+    """response from GET /store/v1/wallet/{puuid}; CurrencyLimits absent from the store endpoint (defaults to {})"""
+    Balances: dict[str, int] = field(default_factory=dict)               # currency-UUID -> current amount
+    CurrencyLimits: dict[str, _CurrencyLimit] | dict[str, dict[str, object]] = field(default_factory=dict)  # currency-UUID -> { Limits: {...} }
+
+    def __post_init__(self) -> None:
+        if self.CurrencyLimits:
+            sample = next(iter(self.CurrencyLimits.values()))
+            if isinstance(sample, dict):
+                self.CurrencyLimits = {
+                    k: _CurrencyLimit(**_filter_known(_CurrencyLimit, v))  # pyright: ignore[reportArgumentType]
+                    for k, v in self.CurrencyLimits.items()
+                    if isinstance(v, dict)
+                }
 
 @dataclass
 class _LatestCompetitiveUpdate:
-    """Most recent competitive match update."""
+    """most recent competitive match update"""
     MatchID: str | None = None                              # Match UUID
     MapID: str | None = None                                # Map path: "/Game/Maps/Juliett/Juliett"
+    QueueID: str | None = None                              # Queue identifier (e.g. "competitive", "")
     SeasonID: str | None = None                             # Season UUID (act)
     MatchStartTime: int | None = None                       # Match start time (Unix ms)
     MatchLength: int | None = None                          # Match duration (ms)
@@ -872,7 +830,7 @@ class _LatestCompetitiveUpdate:
 
 @dataclass
 class _SeasonalInfo:
-    """Per-season competitive stats for a queue."""
+    """per-season competitive stats for a queue"""
     SeasonID: str | None = None                             # Season UUID (act)
     NumberOfWins: int | None = None                         # Wins (excluding placements)
     NumberOfWinsWithPlacements: int | None = None           # Wins including placement matches
@@ -888,7 +846,7 @@ class _SeasonalInfo:
 
 @dataclass
 class _QueueSkillData:
-    """Skill/ranking data for a single queue (competitive, deathmatch, etc.)."""
+    """skill/ranking data for a single queue (competitive, deathmatch, etc.)"""
     TotalGamesNeededForRating: int | None = None                                                    # Total placement games required
     TotalGamesNeededForLeaderboard: int | None = None                                               # Games needed for leaderboard eligibility
     CurrentSeasonGamesNeededForRating: int | None = None                                            # Placement games remaining this season
@@ -899,12 +857,12 @@ class _QueueSkillData:
             first_val = next(iter(self.SeasonalInfoBySeasonID.values()))
             if isinstance(first_val, dict):
                 self.SeasonalInfoBySeasonID = {
-                    k: _SeasonalInfo(**v) for k, v in self.SeasonalInfoBySeasonID.items()  # pyright: ignore[reportCallIssue]
+                    k: _SeasonalInfo(**_filter_known(_SeasonalInfo, v)) for k, v in self.SeasonalInfoBySeasonID.items()  # pyright: ignore[reportArgumentType]
                 }
 
 @dataclass
 class PlayerMMRResponse:
-    """Response from GET /mmr/v1/players/{puuid}"""
+    """response from GET /mmr/v1/players/{puuid}"""
     Version: int | None = None                                                                      # Schema version
     Subject: str | None = None                                                                      # Player UUID (PUUID)
     LatestCompetitiveUpdate: _LatestCompetitiveUpdate | dict[str, object] | None = None             # Most recent ranked match result
@@ -920,12 +878,12 @@ class PlayerMMRResponse:
 
     def __post_init__(self) -> None:
         if isinstance(self.LatestCompetitiveUpdate, dict):
-            self.LatestCompetitiveUpdate = _LatestCompetitiveUpdate(**self.LatestCompetitiveUpdate)  # pyright: ignore[reportArgumentType]
+            self.LatestCompetitiveUpdate = _LatestCompetitiveUpdate(**_filter_known(_LatestCompetitiveUpdate, self.LatestCompetitiveUpdate))  # pyright: ignore[reportArgumentType]
         if self.QueueSkills:
             first_val = next(iter(self.QueueSkills.values()))
             if isinstance(first_val, dict):
                 self.QueueSkills = {
-                    k: _QueueSkillData(**v) for k, v in self.QueueSkills.items()  # pyright: ignore[reportCallIssue]
+                    k: _QueueSkillData(**_filter_known(_QueueSkillData, v)) for k, v in self.QueueSkills.items()  # pyright: ignore[reportArgumentType]
                 }
                 
                 
@@ -933,7 +891,7 @@ class PlayerMMRResponse:
 
 @dataclass
 class MatchHistoryEntry:
-    """A single entry from the match history endpoint."""
+    """a single entry from the match history endpoint"""
     MatchID: str = ""
     GameStartTime: int = 0          # Unix milliseconds
     QueueID: str | None = None
@@ -941,7 +899,7 @@ class MatchHistoryEntry:
 
 @dataclass
 class MatchHistoryResponse:
-    """Response from GET /match-history/v1/history/{puuid}."""
+    """response from GET /match-history/v1/history/{puuid}"""
     Subject: str = ""
     BeginIndex: int = 0
     EndIndex: int = 0
@@ -955,7 +913,7 @@ class MatchHistoryResponse:
 
 @dataclass
 class LeaderboardPlayer:
-    """Single player entry in the leaderboard."""
+    """single player entry in the leaderboard"""
     PlayerCardID: str | None = None
     TitleID: str | None = None
     IsBanned: bool | None = None
@@ -971,7 +929,7 @@ class LeaderboardPlayer:
 
 @dataclass
 class TierDetail:
-    """Tier threshold and pagination info."""
+    """tier threshold and pagination info"""
     rankedRatingThreshold: int | None = None
     startingPage: int | None = None
     startingIndex: int | None = None
@@ -979,7 +937,7 @@ class TierDetail:
 
 @dataclass
 class LeaderboardResponse:
-    """Response from GET /mmr/v1/leaderboards/affinity/{region}/queue/competitive/season/{seasonId}."""
+    """response from GET /mmr/v1/leaderboards/affinity/{region}/queue/competitive/season/{seasonId}"""
     Deployment: str | None = None
     QueueID: str | None = None
     SeasonID: str | None = None
@@ -1003,40 +961,13 @@ class LeaderboardResponse:
 
 @dataclass
 class AccountProgress:
-    """Per-account match collection progress.
-
-    Tracks two boundaries that define a "known window":
-    - newest_known_time: most recent match timestamp we've ever seen
-    - oldest_fetched_time: oldest match timestamp we've ever fetched
-
-    Everything between these two times has already been fetched. Fresh matches
-    are newer than newest_known_time; legacy matches are older than
-    oldest_fetched_time.
-    """
-    newest_known_time: int = 0
-    oldest_fetched_time: int = 0
-    legacy_complete: bool = False
+    """per-account match collection progress; currently empty, kept so the JSON file can track observed PUUIDs"""
 
 
 @dataclass
 class MatchWatermark:
-    """Central cross-session state for match collection.
-
-    Account progress (fresh/legacy boundaries) is per-PUUID since each
-    account has its own match history.  Everything else is shared across
-    all accounts to avoid redundant API calls:
-
-    - fetched_matches: match IDs whose details have already been fetched
-      by *any* account in *any* phase, prevents duplicate detail requests.
-    - dig_visited: player PUUIDs whose match history has been explored
-      during the DFS dig phase, never re-dug.
-    - dig_visited_matches: match IDs that have been visited as graph
-      vertices during the DFS dig phase, prevents re-visiting the same
-      match from a different player vertex.
-
-    The unvisited player pool (dig_queue in the JSON file) is managed as
-    an in-memory set by MatchCollector, not stored in this dataclass.
-    """
+    """central cross-session match collection state; fetched_matches dedupes detail fetches,
+    dig_visited/dig_visited_matches track DFS state across all accounts"""
     accounts: dict[str, AccountProgress] = field(default_factory=dict)
     fetched_matches: set[str] = field(default_factory=set)
     dig_visited: set[str] = field(default_factory=set)
@@ -1093,6 +1024,7 @@ class _PregamePlayer:
 class _PregameTeam:
     TeamID: str | None = None
     Players: list[_PregamePlayer] | list[dict[str, object]] | None = None
+    TeamNumber: int | None = None
 
     def __post_init__(self) -> None:
         if self.Players and isinstance(self.Players[0], dict):
@@ -1102,7 +1034,7 @@ class _PregameTeam:
 
 @dataclass
 class PregameMatchResponse:
-    """Response from GET /pregame/v1/matches/{matchId}."""
+    """response from GET /pregame/v1/matches/{matchId}"""
     ID: str | None = None
     Version: int | None = None
     Teams: list[_PregameTeam] | list[dict[str, object]] | None = None
@@ -1194,7 +1126,7 @@ class _IngamePlayer:
 
 @dataclass
 class IngameMatchResponse:
-    """Response from GET /core-game/v1/matches/{matchId}."""
+    """response from GET /core-game/v1/matches/{matchId}"""
     MatchID: str | None = None
     Version: int | None = None
     State: str | None = None
@@ -1229,14 +1161,14 @@ class IngameMatchResponse:
 
 @dataclass
 class _LoadoutSocketItem:
-    """Inner item inside a socket slot."""
+    """inner item inside a socket slot"""
     ID: str | None = None
     TypeID: str | None = None
 
 
 @dataclass
 class _LoadoutSocket:
-    """A single socket on a weapon/item."""
+    """a single socket on a weapon/item"""
     ID: str | None = None
     Item: _LoadoutSocketItem | dict[str, object] | None = None
 
@@ -1247,7 +1179,7 @@ class _LoadoutSocket:
 
 @dataclass
 class _LoadoutItem:
-    """A weapon or equipment entry in the loadout."""
+    """a weapon or equipment entry in the loadout"""
     ID: str | None = None
     TypeID: str | None = None
     Sockets: dict[str, _LoadoutSocket] | dict[str, dict[str, object]] | None = None
@@ -1263,7 +1195,7 @@ class _LoadoutItem:
 
 @dataclass
 class _LoadoutSpraySelection:
-    """A single spray selection."""
+    """a single spray selection"""
     SocketID: str | None = None
     SprayID: str | None = None
     LevelID: str | None = None
@@ -1271,7 +1203,7 @@ class _LoadoutSpraySelection:
 
 @dataclass
 class _LoadoutSprays:
-    """Spray selections container."""
+    """spray selections container"""
     SpraySelections: list[_LoadoutSpraySelection] | list[dict[str, object]] | None = None
 
     def __post_init__(self) -> None:
@@ -1281,7 +1213,7 @@ class _LoadoutSprays:
 
 @dataclass
 class _LoadoutAESSelection:
-    """A single AES (expression) selection."""
+    """a single AES (expression) selection"""
     SocketID: str | None = None
     AssetID: str | None = None
     TypeID: str | None = None
@@ -1289,7 +1221,7 @@ class _LoadoutAESSelection:
 
 @dataclass
 class _LoadoutExpressions:
-    """Expression selections container."""
+    """expression selections container"""
     AESSelections: list[_LoadoutAESSelection] | list[dict[str, object]] | None = None
 
     def __post_init__(self) -> None:
@@ -1299,7 +1231,7 @@ class _LoadoutExpressions:
 
 @dataclass
 class _LoadoutData:
-    """A player's full loadout for a match."""
+    """a player's full loadout for a match"""
     Subject: str | None = None
     Sprays: _LoadoutSprays | dict[str, object] | None = None
     Expressions: _LoadoutExpressions | dict[str, object] | None = None
@@ -1321,7 +1253,7 @@ class _LoadoutData:
 
 @dataclass
 class _IngameLoadoutEntry:
-    """A single player's loadout entry in the response."""
+    """a single player's loadout entry in the response"""
     CharacterID: str | None = None
     Loadout: _LoadoutData | dict[str, object] | None = None
     Subject: str | None = None
@@ -1334,7 +1266,7 @@ class _IngameLoadoutEntry:
 
 @dataclass
 class IngameLoadoutsResponse:
-    """Response from GET /core-game/v1/matches/{matchId}/loadouts."""
+    """response from GET /core-game/v1/matches/{matchId}/loadouts"""
     Loadouts: list[_IngameLoadoutEntry] | list[dict[str, object]] | None = None
 
     def __post_init__(self) -> None:
@@ -1348,11 +1280,7 @@ class IngameLoadoutsResponse:
 
 @dataclass
 class StorefrontResponse:
-    """Response from POST /store/v3/storefront/{puuid}.
-
-    Only the daily skin offers (SkinsPanelLayout) are modelled;
-    the remaining sections are kept as raw dicts.
-    """
+    """response from POST /store/v3/storefront/{puuid}; only SkinsPanelLayout modelled, rest kept as raw dicts"""
     SkinsPanelLayout: dict[str, object] | None = None
     FeaturedBundle: dict[str, object] | None = None
     UpgradeCurrencyStore: dict[str, object] | None = None
@@ -1362,14 +1290,14 @@ class StorefrontResponse:
 
     @property
     def single_item_offers(self) -> list[str]:
-        """The 4 daily skin-offer item IDs."""
+        """the 4 daily skin-offer item IDs"""
         if not self.SkinsPanelLayout:
             return []
         return self.SkinsPanelLayout.get("SingleItemOffers", [])  # pyright: ignore[reportReturnType]
 
     @property
     def single_item_offers_remaining_seconds(self) -> int | None:
-        """Seconds until the daily offers rotate."""
+        """seconds until the daily offers rotate"""
         if not self.SkinsPanelLayout:
             return None
         return self.SkinsPanelLayout.get("SingleItemOffersRemainingDurationInSeconds")  # pyright: ignore[reportReturnType]
@@ -1377,15 +1305,7 @@ class StorefrontResponse:
 
 @dataclass
 class AccountAlias:
-    """A single name/tag alias from the player's account history.
-
-    Attributes:
-        active: Whether this alias is the currently active one.
-        created_datetime: Epoch milliseconds when this alias was set.
-        game_name: The display name (e.g. "JudgeMainNoBrain").
-        summoner: Whether this is a summoner name (League of Legends).
-        tag_line: The tag (e.g. "Judge").
-    """
+    """a single name/tag alias from the player's account history"""
 
     active: bool | None = None
     created_datetime: int | None = None
@@ -1398,7 +1318,7 @@ class AccountAlias:
 
 
 class SessionLoopState(Enum):
-    """Relevant session loop states from presence data."""
+    """relevant session loop states from presence data"""
 
     MENUS = "MENUS"
     PREGAME = "PREGAME"
@@ -1407,16 +1327,93 @@ class SessionLoopState(Enum):
 
 @dataclass(frozen=True)
 class GameStateTransition:
-    """Payload emitted with GAME_STATE_CHANGED events.
-
-    Attributes:
-        previous: The previous loop state (None on first detection).
-        current:  The new loop state.
-        puuid:    The player's UUID.
-        presence: The full presence object that triggered the transition.
-    """
+    """payload emitted with GAME_STATE_CHANGED events (previous, current, puuid, presence)"""
 
     previous: SessionLoopState | None
     current: SessionLoopState
     puuid: str
     presence: Presence
+
+@dataclass
+class MatchDetailEvent:
+    """payload for MATCH_DETAIL_FETCHED; riot_status == 0 indicates transport failure (not HTTP)"""
+    shard: str
+    match_id: str
+    riot_status: int
+    match_details: dict[str, Any] | None  # pyright: ignore[reportExplicitAny]
+    game_start_millis: int | None = None
+
+
+@dataclass
+class CompetitiveUpdate:
+    """one competitive-update row in ValorantCompetitiveUpdatesResponse.Matches; unknown fields dropped by from_dict"""
+    MatchID: str = ""
+    MapID: str = ""
+    QueueID: str = ""
+    SeasonID: str = ""
+    MatchStartTime: int = 0
+    MatchLength: int = 0
+    TierAfterUpdate: int = 0
+    TierBeforeUpdate: int = 0
+    RankedRatingAfterUpdate: int = 0
+    RankedRatingBeforeUpdate: int = 0
+    RankedRatingEarned: int = 0
+    RankedRatingPerformanceBonus: int = 0
+    RankedRatingRefundApplied: int = 0
+    NewMapIncentiveRRForgiven: int = 0
+    CompetitiveMovement: str = ""
+    AFKPenalty: int = 0
+    WasDerankProtected: bool = False
+    WasDerankProtectionReplenished: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CompetitiveUpdate:  # pyright: ignore[reportExplicitAny]
+        known = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in data.items() if k in known})  # pyright: ignore[ reportAny]
+
+
+@dataclass
+class ValorantCompetitiveUpdatesResponse:
+    """one page of GET /mmr/v1/players/{puuid}/competitiveupdates; no total count -> assembler pages by 20 until short page or 400 BAD_PARAMETER"""
+    Subject: str = ""
+    Version: int = 0
+    Matches: list[CompetitiveUpdate] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ValorantCompetitiveUpdatesResponse:  # pyright: ignore[reportExplicitAny]
+        known = cls.__dataclass_fields__
+        filtered: dict[str, Any] = {k: v for k, v in data.items() if k in known}  # pyright: ignore[reportExplicitAny, reportAny]
+        raw_matches = filtered.pop("Matches", []) or []  # pyright: ignore[reportUnknownVariableType]
+        matches: list[CompetitiveUpdate] = [
+            CompetitiveUpdate.from_dict(m) if isinstance(m, dict) else m  # pyright: ignore[reportUnknownArgumentType]
+            for m in raw_matches   # pyright: ignore[reportUnknownVariableType]
+        ]
+        return cls(Matches=matches, **filtered)   # pyright: ignore[reportAny]
+
+
+@dataclass
+class CompetitiveUpdateEvent:
+    """payload for COMPETITIVE_UPDATE_FETCHED; riot_status==200 with payload or non-200 with None;
+    BAD_CLAIMS/429-exhausted are swallowed in the assembler and never emitted"""
+    shard: str
+    puuid: str
+    riot_status: int
+    competitive_updates: dict[str, Any] | None  # pyright: ignore[reportExplicitAny]
+    fetch_time_ms: int
+
+
+@dataclass
+class MatchHistoryEvent:
+    """payload for MATCH_HISTORY_FETCHED; emitted when a full multi-page assembly completes or aborts"""
+    shard: str
+    puuid: str
+    riot_status: int
+    match_history: dict[str, Any] | None  # pyright: ignore[reportExplicitAny]
+    fetch_time_ms: int
+
+
+@dataclass
+class IngameLoadoutsEvent:
+    """payload for INGAME_LOADOUTS_FETCHED; match_id captured at fetch time to survive gamestate transitions"""
+    match_id: str
+    loadouts: IngameLoadoutsResponse

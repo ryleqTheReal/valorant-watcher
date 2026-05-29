@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 class Event(Enum):
     """All events that can occur in the system."""
-
+    
+    STARTUP = "STARTUP"                         # Watcher process started
     RSO_LOGIN = "RSO_LOGIN"                     # Riot Client logged in (lockfile + RSO 200)
     RSO_LOGOUT = "RSO_LOGOUT"                   # Riot Client logged out (RSO non-200 / lockfile gone)
     VALORANT_OPENED = "VALORANT_OPENED"         # Valorant process detected, lockfile read
@@ -27,6 +28,8 @@ class Event(Enum):
     AUTH_FAILED = "AUTH_FAILED"                 # Riot auth failed
     MATCH_STARTED = "MATCH_STARTED"             # New match detected
     MATCH_ENDED = "MATCH_ENDED"                 # Match finished
+    PREGAME_STARTED = "PREGAME_STARTED"         # Entered agent-select / pregame
+    PREGAME_ENDED = "PREGAME_ENDED"             # Left pregame
     DATA_COLLECTED = "DATA_COLLECTED"           # New stats data collected
     DATA_SENT = "DATA_SENT"                     # Data sent to remote server
     DATA_QUEUED = "DATA_QUEUED"                 # Data queued locally (offline)
@@ -37,8 +40,11 @@ class Event(Enum):
     OWNED_ITEMS_UPDATED = "OWNED_ITEMS_UPDATED" # User has acquired or lost items
     USER_XP_UPDATED = "USER_XP_UPDATED"         # The user's XP has been updated
     PENALTIES_UPDATED = "PENALTIES_UPDATED"     # Emitted when the user's penalties updated
+    BALANCES_UPDATED = "BALANCES_UPDATED"       # Emitted when the user's wallet balances change
     MMR_HISTORY_UPDATED = "MMR_HISTORY_UPDATED" # The player's MMR history has updated
-    MATCH_DETAIL_FETCHED = "MATCH_DETAIL_FETCHED" # A match's full details have been fetched
+    MATCH_DETAIL_FETCHED = "MATCH_DETAIL_FETCHED" # A match's full details have been fetched (MatchDetailEvent payload)
+    MATCH_HISTORY_FETCHED = "MATCH_HISTORY_FETCHED" # A player's match history page has been fetched (MatchHistoryEvent payload)
+    COMPETITIVE_UPDATE_FETCHED = "COMPETITIVE_UPDATE_FETCHED" # A player's competitive update has been fully assembled or aborted (CompetitiveUpdateEvent payload)
     LEADERBOARD_FETCHED = "LEADERBOARD_FETCHED" # Leaderboard data has been retrieved
     PREGAME_MATCH_UPDATED = "PREGAME_MATCH_UPDATED" # Pregame match data fetched during agent select
     INGAME_MATCH_UPDATED = "INGAME_MATCH_UPDATED"   # Ingame match data fetched when match starts
@@ -68,8 +74,6 @@ class Listener:
     priority: int = 0       # Higher = executed first
     once: bool = False       # One-shot listener (removed after first call)
     name: str = ""           # Debug label
-
-
 
 
 class EventBus:

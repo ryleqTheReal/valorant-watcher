@@ -1,31 +1,8 @@
 """
 Backend communication service.
 
-Owns the lifecycle of the client's session against the API.
-
-The backend uses two token scopes:
-
-- **App** token: for user infos 
-- **Game** token: app token + a bound PUUID. Used for match / history / task
-  endpoints. Each game token is bound to one PUUID; the `puuid` header on
-  game-scoped requests must equal that bound PUUID.
-
-Both scopes have their own access/refresh pair (access ~1d, refresh ~30d).
-
-Lifecycle driven by the event bus:
-
-- HARDWARE_COLLECTED -> stores the hwid_hash AND immediately acquires the
-  **app** token (refresh stored pair, or run Discord OAuth + /v1/login).
-  The app token is device-bound, not account-bound, so it lives for the
-  whole app lifetime regardless of which Riot account is signed in.
-- AUTH_SUCCESS       -> stores the RiotSession (used for shard lookup).
-- USERINFO_FETCHED   -> mints a **game** token bound to that account's
-  PUUID + shard via /v1/auth/game-token. Game tokens turn over every
-  time a different account logs in.
-- RSO_LOGOUT / SHUTDOWN -> tear down the proactive refresh task.
-
-A background task refreshes each access token at 75% of its lifetime so
-authenticated requests never see ACCESS_TOKEN_EXPIRED in normal operation.
+Two token scopes: app (user info) and game (app + bound PUUID, for match/history/task).
+Both have access/refresh pairs (access ~1d, refresh ~30d); access tokens refreshed at 75% of lifetime.
 """
 
 from __future__ import annotations
@@ -54,8 +31,7 @@ from utils.hardware_mac import MacHardwareSnapshot
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-# Error codes that mean the stored token is permanently dead and no amount
-# of retrying / refreshing will recover it.
+# error codes indicating a permanently dead token; no amount of retrying/refreshing will recover it
 _DEAD_TOKEN_ERRORS: set[str] = {
     "REFRESH_TOKEN_EXPIRED",
     "TOKEN_DECODE_ERROR",
@@ -68,10 +44,7 @@ _DEAD_TOKEN_ERRORS: set[str] = {
 
 @dataclass
 class TokenPair:
-    """A single access + refresh pair returned by the backend.
-
-    Both expiry timestamps are Unix seconds (UTC).
-    """
+    """access/refresh token pair; expiry timestamps are Unix seconds (UTC)"""
 
     access_token: str
     access_token_expires_at: int
@@ -90,13 +63,12 @@ class TokenPair:
 
 @dataclass
 class StoredSession:
-    """Stores the app token under "app": "..."
-    """
+    """persisted session holding the app token pair"""
     app: TokenPair
 
 
 class BackendCommunicationService:
-    """Drives the backend auth lifecycle off the event bus."""
+    """drives the backend auth lifecycle off the event bus"""
 
     def __init__(
         self,
@@ -149,7 +121,7 @@ class BackendCommunicationService:
         self._session = session
 
     async def _on_userinfo(self, userinfo: UserInfoResponse) -> None:
-        """Mint a game token bound to the just-logged-in Riot account."""
+        """mint a game token bound to the just-logged-in Riot account"""
 
         if not self._session:
             return
@@ -160,15 +132,14 @@ class BackendCommunicationService:
             return
 
         async with self._auth_lock:
-            # Hardware event may have failed to acquire the app token, or
-            # may not have fired yet, try again now
+            # hardware event may not have fired yet or may have failed -> retry now
             if self._app_tokens is None and not await self._ensure_app_token():
                 logger.error("Cannot mint game token: app token unavailable.")
                 return
             _ = await self._ensure_game_token(puuid=puuid, shard=self._session.region.pd_shard)
 
     async def _on_logout(self, data: Any = None) -> None:  # pyright: ignore[reportExplicitAny, reportAny, reportUnusedParameter]
-        # Drop the game token, keep the app token alive.
+        # drop game token, keep app token alive
         async with self._auth_lock:
             self._game_tokens = None
             self._bound_puuid = None
@@ -183,12 +154,7 @@ class BackendCommunicationService:
     # ------------------- Authentication -------------------
 
     async def _ensure_app_token(self) -> bool:
-        """Make sure `self._app_tokens` is populated.
-
-        Refreshes a stored pair if one is on disk, otherwise runs the
-        Discord OAuth loopback flow and POSTs /v1/login. Returns True on
-        success.
-        """
+        """ensure app tokens are set; refreshes from disk if available, otherwise runs Discord OAuth -> POST /v1/login"""
         if self._app_tokens is not None and not self._app_tokens.is_refresh_expired():
             return True
 
@@ -208,7 +174,7 @@ class BackendCommunicationService:
                 self._start_proactive_refresh()
                 logger.info(
                     f"App token refreshed. Access valid {self._app_tokens.access_expires_in()}s, "  # pyright: ignore[reportImplicitStringConcatenation]
-                    f"refresh valid {self._app_tokens.refresh_expires_in() / 86400}d."
+                    f"refresh valid {self._app_tokens.refresh_expires_in()}s."
                 )
                 return True
 
@@ -234,7 +200,7 @@ class BackendCommunicationService:
             logger.error(f"POST /v1/login rejected the request: HTTP {e.status_code} error_code={e.error_code}")
             return False
 
-        # Fresh login invalidates any previously-bound game token.
+        # fresh login invalidates any previously-bound game token
         self._game_tokens = None
         self._bound_puuid = None
         self._bound_shard = None
@@ -247,11 +213,10 @@ class BackendCommunicationService:
         return True
 
     async def _ensure_game_token(self, puuid: str, shard: str) -> bool:
-        """Make sure `self._game_tokens` is bound to (puuid, shard)."""
+        """ensure game tokens are bound to (puuid, shard)"""
         assert self._app_tokens is not None
 
-        # Same account as before with a healthy game refresh — refresh it
-        # rather than burning a fresh mint.
+        # same account with a healthy refresh token -> refresh rather than minting a new one
         if (
             self._game_tokens is not None
             and self._bound_puuid == puuid
@@ -303,14 +268,8 @@ class BackendCommunicationService:
             logger.warning(f"{scope.capitalize()} refresh failed: HTTP {e.status_code} error_code={e.error_code}")
 
     async def _discord_login(self) -> tuple[str, str, str] | None:
-        """Walk the user through Discord OAuth via a loopback redirect.
-
-        Binds an HTTP server to 127.0.0.1:<os-assigned-port>, hands that
-        URL to /v1/auth/discord as `loopback_redirect`, opens the auth
-        URL in the user's browser, and waits for the server's 303 to
-        land on the loopback with `provider`, `provider_id`, and
-        `access_token` in the query string.
-        """
+        """Discord OAuth via loopback redirect; binds a local HTTP server, opens the auth URL in the browser,
+        and waits for the callback with provider/provider_id/access_token in the query string"""
         loop = asyncio.get_running_loop()
         received: asyncio.Future[dict[str, str]] = loop.create_future()
 
@@ -361,7 +320,7 @@ class BackendCommunicationService:
             server.close()
             try:
                 await server.wait_closed()
-            except Exception:  # noqa: BLE001
+            except Exception:  
                 pass
 
     @staticmethod
@@ -370,14 +329,14 @@ class BackendCommunicationService:
         writer: asyncio.StreamWriter,
         received: asyncio.Future[dict[str, str]],
     ) -> None:
-        """One-shot HTTP handler for the OAuth loopback callback."""
+        """one-shot HTTP handler for the OAuth loopback callback"""
         try:
             request_line_bytes = await reader.readline()
             request_line = request_line_bytes.decode("latin-1", errors="replace")
             parts = request_line.split()
             target = parts[1] if len(parts) >= 2 else ""
 
-            # Drain headers; we don't need them.
+            # drain headers; we don't need them
             while True:
                 header = await reader.readline()
                 if not header or header in (b"\r\n", b"\n"):
@@ -469,7 +428,7 @@ class BackendCommunicationService:
         json: dict[str, Any],  # pyright: ignore[reportExplicitAny]
         headers: dict[str, str] | None = None,
     ) -> TokenPair:
-        """POST helper that turns transport-level failures into BackendAuthError."""
+        """POST helper; raises BackendAuthError on transport failure"""
         try:
             response = await self._client.post(f"{self.base_url}{path}", json=json, headers=headers)
         except httpx.HTTPError as e:
@@ -545,12 +504,12 @@ class BackendCommunicationService:
         self._refresh_task = asyncio.create_task(self._proactive_refresh_loop())
 
     async def _proactive_refresh_loop(self) -> None:
-        """Refresh whichever access token is about to expire first."""
+        """refresh whichever access token expires soonest"""
         while not self._cancelled.is_set():
             if self._app_tokens is None:
                 return
 
-            # Refresh the pair whose access token expires soonest.
+            # pick the pair whose access token expires soonest
             app_remaining = self._app_tokens.access_expires_in()
             game_remaining = (
                 self._game_tokens.access_expires_in()
@@ -599,7 +558,7 @@ class BackendCommunicationService:
             )
 
     async def _cancellable_sleep(self, seconds: float) -> bool:
-        """Sleep for `seconds`. Return True if cancelled, False on timeout."""
+        """sleep for `seconds`; returns True if cancelled, False on timeout"""
         if seconds <= 0:
             return self._cancelled.is_set()
         try:
@@ -638,18 +597,17 @@ class BackendCommunicationService:
 
     @property
     def app_access_token(self) -> str | None:
-        """The current backend **app** access token, if authenticated."""
+        """current app access token, or None if not authenticated"""
         return self._app_tokens.access_token if self._app_tokens else None
 
     @property
     def game_access_token(self) -> str | None:
-        """The current backend **game** access token, if authenticated."""
+        """current game access token, or None if not authenticated"""
         return self._game_tokens.access_token if self._game_tokens else None
 
     @property
     def game_headers(self) -> dict[str, str] | None:
-        """Headers required by game-scoped backend endpoints, or None if
-        no game token is currently held."""
+        """headers for game-scoped backend endpoints, or None if no game token held"""
         if self._game_tokens is None or self._bound_puuid is None or self._bound_shard is None:
             return None
         return {
@@ -670,7 +628,7 @@ def _write_http_response(
     content_type: str,
     body: bytes,
 ) -> None:
-    """Write a minimal HTTP/1.1 response to `writer`."""
+    """write a minimal HTTP/1.1 response to `writer`"""
     reason = {
         200: "OK",
         303: "See Other",
